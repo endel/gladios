@@ -1,0 +1,13 @@
+{
+  "name": "gladios",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "php test/unit.php",
+    "test:browser": "node test/browser.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.64.0"
+  }
+}
