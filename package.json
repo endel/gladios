@@ -5,8 +5,11 @@
   "type": "module",
   "scripts": {
     "test": "test/e2e/run.sh",
+    "test:install": "test/install/run.sh",
     "bench": "test/bench/run.sh",
-    "test:browser": "node test/browser.mjs"
+    "test:browser": "node test/browser.mjs",
+    "website": "website/build.sh",
+    "website:deploy": "website/build.sh && npx wrangler@4 pages deploy website/dist --project-name gladios --branch main"
   },
   "devDependencies": {
     "playwright": "1.64.0"

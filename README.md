@@ -68,7 +68,8 @@ fail2ban/              filter.d/gladios.conf (strikes), action.d/gladios-notify.
 bin/gladios-notify     posts a digest of recent bans to a webhook (Python 3)
 cron.d/                runs it every minute, once /etc/gladios/notify.conf exists
 install.sh             installs all of the above on this host, or copies it into a config tree
-test/                  unit tests (njs), a browser test, a Docker end-to-end setup, a benchmark
+test/                  unit tests (njs), a browser test, Docker end-to-end and install tests, a benchmark
+website/               gladios.dev: the page, and the release install.sh downloads
 ```
 
 ## Installing
@@ -221,6 +222,7 @@ While the check fails, `<body>` has the class `failed`: show the button then.
 ```sh
 npm install                 # Playwright, for the browser test
 test/e2e/run.sh             # Docker: Debian 12's nginx and njs 0.7.9, then the checks and browsers
+test/install/run.sh         # Docker: install.sh piped into sh on clean Debian, Ubuntu, Alpine, nginx.org
 test/bench/run.sh           # Docker: load test, see Performance
 ```
 

@@ -1,0 +1,16 @@
+# cloudflareinsights: Cloudflare Web Analytics' beacon, once it's switched on
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; connect-src 'self' https://cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+
+# readable in a browser before it's piped into a shell
+/install.sh
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=300
+
+/gladios.tar.gz
+  Cache-Control: public, max-age=300
+
+/.gladios/mascot
+  Content-Type: image/webp

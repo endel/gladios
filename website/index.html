@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gladios: stop HTTP floods at nginx</title>
+<meta name="description" content="gladios adds a “Checking your browser” page to the nginx you already run. Visitors pass in about a second; bots and HTTP floods never get past it. No service to run, no third party, MIT licensed.">
+<link rel="canonical" href="https://gladios.dev/">
+<link rel="icon" href="/favicon.png" type="image/png" sizes="48x48">
+<link rel="icon" href="/icon.png" type="image/png" sizes="180x180">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#f9fafb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181c" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://gladios.dev/">
+<meta property="og:title" content="gladios: stop HTTP floods at nginx">
+<meta property="og:description" content="A self-hosted “Checking your browser” page for nginx. No service to run, no third party.">
+<meta property="og:image" content="https://gladios.dev/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="gladios: stop bots and HTTP floods at nginx">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: oklch(0.985 0.002 260);
+    --surface: #fff;
+    --surface-2: oklch(0.965 0.004 260);
+    --fg: oklch(0.215 0.012 260);
+    --muted: oklch(0.5 0.014 260);
+    --line: oklch(0.91 0.006 260);
+    --steel: oklch(0.32 0.02 260);
+    --steel-fg: #fff;
+    --accent: oklch(0.55 0.2 27);
+    --accent-wash: oklch(0.55 0.2 27 / 0.08);
+    --ok: oklch(0.6 0.15 150);
+    --code-bg: oklch(0.21 0.012 260);
+    --code-fg: oklch(0.93 0.004 260);
+    --code-muted: oklch(0.66 0.014 260);
+    --code-hi: oklch(0.8 0.12 75);
+    --shadow: 0 1px 2px oklch(0.2 0.02 260 / 0.06), 0 12px 32px -8px oklch(0.2 0.02 260 / 0.14);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: oklch(0.17 0.008 260);
+      --surface: oklch(0.205 0.009 260);
+      --surface-2: oklch(0.235 0.01 260);
+      --fg: oklch(0.935 0.004 260);
+      --muted: oklch(0.72 0.012 260);
+      --line: oklch(0.3 0.01 260);
+      --steel: oklch(0.88 0.008 260);
+      --steel-fg: oklch(0.2 0.008 260);
+      --accent: oklch(0.7 0.17 27);
+      --accent-wash: oklch(0.7 0.17 27 / 0.1);
+      --ok: oklch(0.72 0.15 150);
+      --code-bg: oklch(0.13 0.006 260);
+      --code-muted: oklch(0.64 0.012 260);
+      --shadow: 0 1px 2px oklch(0 0 0 / 0.3), 0 16px 40px -12px oklch(0 0 0 / 0.6);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 64px; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; text-decoration-color: color-mix(in oklch, currentColor 35%, transparent); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--accent); }
+  code, pre, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+  :is(p, li, td, figcaption) code:not(pre code, .cmd code) {
+    font-size: 0.875em;
+    padding: 0.1em 0.35em;
+    border-radius: 5px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  .wrap { width: 100%; max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+  @media (max-width: 560px) { .wrap { padding: 0 16px; } }
+  button { font: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* header */
+  header.top {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: color-mix(in oklch, var(--bg) 85%, transparent);
+    backdrop-filter: saturate(1.4) blur(10px);
+    -webkit-backdrop-filter: saturate(1.4) blur(10px);
+    border-bottom: 1px solid color-mix(in oklch, var(--line) 70%, transparent);
+  }
+  header.top .wrap { display: flex; align-items: center; gap: 20px; height: 56px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 1.0625rem; letter-spacing: -0.01em; text-decoration: none; }
+  .brand img { width: 32px; height: 32px; }
+  nav { margin-left: auto; display: flex; gap: 20px; font-size: 0.9375rem; }
+  nav a { text-decoration: none; color: var(--muted); }
+  nav a:hover { color: var(--fg); }
+  @media (max-width: 640px) { nav .wide { display: none; } }
+
+  /* sponsor */
+  .sponsor {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 12px 4px 7px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 0.8125rem;
+    text-decoration: none;
+  }
+  .sponsor:hover { border-color: color-mix(in oklch, #7a3be2 50%, var(--line)); }
+  .sponsor svg { width: 16px; height: 18px; }
+  .sponsor strong { color: var(--fg); font-weight: 600; }
+
+  /* hero */
+  .hero { padding: 48px 0 64px; }
+  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); gap: 48px; align-items: center; }
+  @media (max-width: 880px) {
+    .hero { padding: 28px 0 48px; }
+    .hero .wrap { grid-template-columns: minmax(0, 1fr); gap: 36px; }
+  }
+  h1 {
+    margin: 18px 0 0;
+    font-size: clamp(2.125rem, 4.4vw, 3.125rem);
+    line-height: 1.06;
+    font-weight: 750;
+    letter-spacing: -0.035em;
+    text-wrap: balance;
+  }
+  .lede { margin: 16px 0 0; max-width: 34em; font-size: 1.125rem; color: var(--muted); text-wrap: pretty; }
+  .points { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 18px 0 0; padding: 0; list-style: none; font-size: 0.9375rem; font-weight: 500; }
+  .points li { display: flex; align-items: center; gap: 7px; }
+  .points svg { width: 16px; height: 16px; flex: none; color: var(--ok); }
+
+  .cmd {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 26px 0 0;
+    padding: 12px 12px 12px 16px;
+    border-radius: 11px;
+    background: var(--code-bg);
+    color: var(--code-fg);
+  }
+  .hero .cmd { box-shadow: var(--shadow); }
+  @media (prefers-color-scheme: dark) { .cmd { border: 1px solid var(--line); } }
+  .cmd code { flex: 1; min-width: 0; font-size: 0.875rem; overflow-wrap: break-word; }
+  .cmd code span { white-space: nowrap; }
+  .hero .cmd code { font-size: 0.8125rem; }
+  @media (max-width: 560px) { .cmd code { font-size: 0.8125rem; } }
+  .cmd code::before { content: "$ "; color: var(--code-muted); }
+  .copy {
+    flex: none;
+    padding: 5px 11px;
+    border: 1px solid oklch(1 0 0 / 0.16);
+    border-radius: 7px;
+    background: oklch(1 0 0 / 0.06);
+    color: var(--code-fg);
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+  .copy:hover { background: oklch(1 0 0 / 0.12); }
+  .then { margin: 12px 0 0; font-size: 0.9375rem; color: var(--muted); }
+
+  /* the demo: the challenge page in a browser frame */
+  .browser { border-radius: 14px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); overflow: hidden; }
+  .browser .bar { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+  .dots { display: flex; gap: 6px; }
+  .dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+  .url { flex: 1; min-width: 0; padding: 3px 10px; border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 0.8125rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .page { padding: 22px 20px 20px; text-align: center; }
+  .page img { display: block; width: auto; height: 160px; margin: 0 auto 4px; }
+  .page h2 { margin: 0 0 2px; font-size: 1.1875rem; font-weight: 650; letter-spacing: -0.01em; }
+  .page > p { margin: 0 auto; max-width: 24em; color: var(--muted); font-size: 0.875rem; }
+  .status { display: flex; align-items: center; justify-content: center; gap: 9px; min-height: 24px; margin-top: 14px; font-size: 0.9375rem; font-weight: 500; }
+  .spinner { width: 16px; height: 16px; flex: none; border: 2px solid var(--line); border-top-color: var(--steel); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+  .tick { display: none; width: 18px; height: 18px; flex: none; color: var(--ok); }
+  .demo[data-state="idle"] .spinner, .demo[data-state="done"] .spinner, .demo[data-state="failed"] .spinner { display: none; }
+  .demo[data-state="done"] .tick { display: block; }
+  .demo[data-state="failed"] .status { color: var(--accent); }
+  .proof { padding: 12px 16px; border-top: 1px solid var(--line); text-align: left; font-size: 0.875rem; }
+  .proof dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
+  .proof dt { color: var(--muted); font-size: 0.75rem; }
+  .proof dd { margin: 0; font-weight: 650; font-size: 1.0625rem; letter-spacing: -0.01em; }
+  .hash { margin: 10px 0 0; padding: 7px 10px; border-radius: 7px; background: var(--surface-2); font-size: 0.75rem; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+  .hash b { color: var(--accent); font-weight: 700; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--surface-2); font-size: 0.875rem; }
+  .controls label { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+  select { font: inherit; padding: 4px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); }
+  .btn { display: inline-flex; align-items: center; padding: 6px 14px; border: 0; border-radius: 8px; background: var(--steel); color: var(--steel-fg); font-weight: 600; font-size: 0.875rem; text-decoration: none; }
+  .demo-caption { margin: 12px 4px 0; font-size: 0.8125rem; color: var(--muted); text-align: center; }
+
+  /* sections */
+  section { padding: 64px 0; border-top: 1px solid var(--line); }
+  @media (max-width: 560px) { section { padding: 48px 0; } }
+  h2.title { margin: 0; font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.15; font-weight: 720; letter-spacing: -0.03em; text-wrap: balance; }
+  .intro { margin: 10px 0 0; max-width: 42em; color: var(--muted); text-wrap: pretty; }
+  h3 { margin: 0 0 4px; font-size: 1rem; font-weight: 650; letter-spacing: -0.01em; }
+
+  /* flow */
+  .flow { margin: 32px 0 0; display: grid; gap: 10px; }
+  .lane { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 16px; align-items: center; padding: 14px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+  .lane > .label { font-size: 0.8125rem; font-weight: 650; color: var(--muted); }
+  .lane ol { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 0; margin: 0; padding: 0; list-style: none; }
+  .lane li { display: flex; align-items: center; font-size: 0.875rem; }
+  .lane li + li::before { content: "→"; padding: 0 10px; color: var(--muted); }
+  .chip { padding: 5px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-2); line-height: 1.35; }
+  .chip small { display: block; color: var(--muted); font-size: 0.75rem; }
+  .chip.app { background: var(--steel); color: var(--steel-fg); border-color: var(--steel); font-weight: 600; }
+  .chip.gate { border-color: color-mix(in oklch, var(--accent) 55%, var(--line)); background: var(--accent-wash); }
+  .chip.gate a { text-decoration-color: var(--accent); }
+  .lane .aside { grid-column: 2; margin: -4px 0 0; font-size: 0.8125rem; color: var(--muted); }
+  @media (max-width: 720px) {
+    .lane { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px; }
+    .lane .aside { grid-column: 1; margin: 0; }
+    .lane ol { flex-direction: column; align-items: flex-start; gap: 0; }
+    .lane li { flex-direction: column; align-items: flex-start; }
+    .lane li + li::before { content: "↓"; padding: 3px 0 3px 14px; }
+  }
+
+  .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+  @media (max-width: 920px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 520px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  .card { padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+  .card p { margin: 0; color: var(--muted); font-size: 0.9375rem; text-wrap: pretty; }
+  .card p + p { margin-top: 8px; }
+
+  /* install */
+  .steps { display: grid; gap: 22px; margin: 32px 0 0; padding: 0; list-style: none; counter-reset: step; }
+  .steps > li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 14px; counter-increment: step; }
+  .steps > li::before { content: counter(step); display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent-wash); color: var(--accent); font-weight: 700; font-size: 0.875rem; }
+  .steps h3 { margin: 3px 0 0; }
+  .steps p { margin: 6px 0 0; color: var(--muted); font-size: 0.9375rem; max-width: 46em; }
+  .steps .cmd { margin: 10px 0 0; }
+  pre.code { margin: 10px 0 0; padding: 14px 16px; border-radius: 11px; background: var(--code-bg); color: var(--code-fg); font-size: 0.8125rem; line-height: 1.6; overflow-x: auto; }
+  @media (prefers-color-scheme: dark) { pre.code { border: 1px solid var(--line); } }
+  pre.code .c { color: var(--code-muted); }
+  pre.code .k { color: var(--code-hi); }
+
+  .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 28px; }
+  @media (max-width: 760px) { .two { grid-template-columns: minmax(0, 1fr); } }
+  .card ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 0.9375rem; }
+  .card li { margin: 3px 0; }
+  .card li strong { color: var(--fg); font-weight: 600; }
+
+  /* performance */
+  .perf { width: 100%; margin: 28px 0 0; border-collapse: collapse; font-size: 0.9375rem; }
+  .perf th { text-align: left; font-weight: 600; font-size: 0.8125rem; color: var(--muted); padding: 0 12px 8px 0; border-bottom: 1px solid var(--line); }
+  .perf td { padding: 11px 12px 11px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  .perf td:first-child { width: 34%; }
+  .perf td small { display: block; color: var(--muted); font-size: 0.8125rem; }
+  .perf .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .meter { display: flex; align-items: center; gap: 10px; }
+  .meter .bar { height: 10px; width: calc((100% - 5.5rem) * var(--v)); border-radius: 0 4px 4px 0; background: var(--steel); }
+  .meter .num { font-weight: 600; }
+  @media (max-width: 720px) {
+    .perf thead { display: none; }
+    .perf tr { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .perf td { padding: 0; border: 0; }
+    .perf td:first-child, .perf td:nth-child(2) { grid-column: 1 / -1; width: auto; }
+    .perf td[data-label]::before { content: attr(data-label) " "; color: var(--muted); font-size: 0.8125rem; }
+  }
+  figcaption { margin: 12px 0 0; color: var(--muted); font-size: 0.8125rem; max-width: 56em; }
+
+  footer { padding: 32px 0 44px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.875rem; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; }
+  footer .brand { font-size: 0.9375rem; color: var(--fg); }
+  footer .brand img { width: 26px; height: 26px; }
+  footer nav { margin-left: auto; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="colyseus-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a32fe0"/>
+      <stop offset="1" stop-color="#5945e3"/>
+    </linearGradient>
+    <symbol id="colyseus" viewBox="0 0 488.94 541.2">
+      <path fill="url(#colyseus-gradient)" d="m80.42,197.14c13.82,11.25,30.56,22.25,50.78,32.11,14.87-28.67,72.09-100.71,233.32-79.68l-14.4-55.35c-200.24-17.18-257.81,77.11-269.7,102.92Z"/>
+      <path fill="url(#colyseus-gradient)" d="m44.53,167.77c22.44-40.73,99.17-124.23,290.19-105.83L310.19,1.59S109.9-21.63,8.9,109.47c3.62,10.55,13.31,33.34,35.63,58.29Z"/>
+      <path fill="url(#colyseus-gradient)" d="m407.7,291.25c-32.14,3.35-62.02,4.95-89.63,4.95C123.09,296.2,36.78,219.6,0,164.95v251.98s15.77,162.98,488.94,115.66l-81.24-241.33Z"/>
+    </symbol>
+    <symbol id="check" viewBox="0 0 16 16">
+      <circle cx="8" cy="8" r="7.5" fill="currentColor" opacity=".16"/>
+      <path d="M4.8 8.3l2.1 2.1 4.3-4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/icon.png" width="32" height="32" alt="">gladios</a>
+    <nav aria-label="Sections">
+      <a class="wide" href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a class="wide" href="#performance">Performance</a>
+      <a href="https://github.com/endel/gladios">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="wrap">
+      <div>
+        <a class="sponsor" href="https://colyseus.io/"><svg aria-hidden="true"><use href="#colyseus"/></svg>Sponsored by <strong>Colyseus</strong></a>
+        <h1>Stop bots and HTTP floods before they reach your app</h1>
+        <p class="lede">gladios adds a “Checking your browser” page to the nginx you already run. People pass
+          in about a second, once a week. Bots and flood tools that don’t run JavaScript never get past it,
+          and turning them away costs nginx no more than serving a file.</p>
+        <ul class="points">
+          <li><svg aria-hidden="true"><use href="#check"/></svg>No service or proxy to run</li>
+          <li><svg aria-hidden="true"><use href="#check"/></svg>No third party sees your traffic</li>
+          <li><svg aria-hidden="true"><use href="#check"/></svg>Free and open source</li>
+        </ul>
+        <div class="cmd">
+          <code id="install-cmd">curl -fsSL https://gladios.dev/install.sh <span>| sudo sh</span></code>
+          <button type="button" class="copy" data-copy="install-cmd">Copy</button>
+        </div>
+        <p class="then">Then one line per server: <code>include snippets/gladios.conf;</code></p>
+      </div>
+
+      <div>
+        <div class="browser demo" data-state="idle">
+          <div class="bar" aria-hidden="true">
+            <span class="dots"><i></i><i></i><i></i></span>
+            <span class="url">your-site.example/some/page</span>
+          </div>
+          <div class="page">
+            <img src="/gladios.webp" width="440" height="482" alt="gladios’s mascot, a gladiator reading a book">
+            <h2>Checking your browser</h2>
+            <p>A quick check keeps bots away. It runs about once a week on each device.</p>
+            <div class="status" aria-live="polite">
+              <span class="spinner" aria-hidden="true"></span>
+              <svg class="tick" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor"/><path d="M6 10.4l2.6 2.6L14 7.6" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span id="status">Ready when you are.</span>
+            </div>
+            <noscript><p class="status">This runs the real solver, so it needs JavaScript, just like the check.</p></noscript>
+          </div>
+          <div class="proof" hidden>
+            <dl>
+              <div><dt>Solved in</dt><dd id="took">–</dd></div>
+              <div><dt>Hashes tried</dt><dd id="tried">–</dd></div>
+              <div><dt>Threads</dt><dd id="threads">–</dd></div>
+            </dl>
+            <p class="hash mono" id="hash"></p>
+          </div>
+          <div class="controls">
+            <label>Difficulty
+              <select id="difficulty">
+                <option value="12">12 bits · ~4k hashes</option>
+                <option value="14">14 bits · ~16k hashes</option>
+                <option value="16" selected>16 bits · ~65k hashes</option>
+                <option value="18">18 bits · ~262k hashes</option>
+                <option value="20">20 bits · ~1M hashes</option>
+              </select>
+            </label>
+            <button type="button" class="btn" id="run">Run the check</button>
+          </div>
+        </div>
+        <p class="demo-caption">The real solver, slowed down so you can watch; the numbers are real.
+          <a href="/preview/">See the whole page →</a></p>
+      </div>
+    </div>
+  </div>
+
+  <section id="how">
+    <div class="wrap">
+      <h2 class="title">Floods don’t run JavaScript. Browsers do.</h2>
+      <p class="intro">A browser spends ~65,000 hashes on a puzzle; nginx checks the answer with one. It all
+        runs in nginx and its JavaScript module (njs), so there’s no proxy hop and no process to keep
+        alive. Same idea as <a href="https://github.com/TecharoHQ/anubis">Anubis</a>, minus the service.</p>
+
+      <div class="flow" role="list" aria-label="What happens to each request">
+        <div class="lane" role="listitem">
+          <span class="label">No pass yet</span>
+          <ol>
+            <li><span class="chip gate"><a href="/preview/">Challenge page</a><small>static file, 200</small></span></li>
+            <li><span class="chip">Browser solves the puzzle<small>SHA-256 on Web Workers</small></span></li>
+            <li><span class="chip">Signed pass cookie</span></li>
+            <li><span class="chip">Reloads the same URL</span></li>
+          </ol>
+        </div>
+        <div class="lane" role="listitem">
+          <span class="label">Has a pass</span>
+          <ol>
+            <li><span class="chip">njs checks it<small>one HMAC</small></span></li>
+            <li><span class="chip app">Your app</span></li>
+          </ol>
+          <p class="aside">Forged, expired or from another network: the challenge page again, and a strike for fail2ban.</p>
+        </div>
+        <div class="lane" role="listitem">
+          <span class="label">Bypassed</span>
+          <ol>
+            <li><span class="chip">API clients, webhooks, monitors…<small>your rules</small></span></li>
+            <li><span class="chip app">Your app</span></li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card"><h3>Stateless</h3><p>Puzzles and passes are HMACs. Nothing is stored, so every worker and host sharing the secret agrees.</p></div>
+        <div class="card"><h3>Bound to the network</h3><p>A pass only works from the address (or IPv6 /64) that solved it, so it can’t be shared across a botnet.</p></div>
+        <div class="card"><h3>Cheap where it counts</h3><p>No cookie costs a static file. A pass-shaped cookie costs one HMAC. Nothing else reaches njs.</p></div>
+        <div class="card"><h3>Forgers get banned</h3><p>Forged passes leave strikes for fail2ban, with ban digests to Slack, Discord or a webhook.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <h2 class="title">Installed in a minute</h2>
+      <p class="intro">Debian, Ubuntu, Alpine or nginx.org’s packages. The installer takes care of njs.</p>
+
+      <ol class="steps">
+        <li><div>
+          <h3>Run the installer</h3>
+          <div class="cmd">
+            <code id="install-cmd-2">curl -fsSL https://gladios.dev/install.sh <span>| sudo sh</span></code>
+            <button type="button" class="copy" data-copy="install-cmd-2">Copy</button>
+          </div>
+          <p>Installs njs if it’s missing, copies gladios into place and writes a secret and
+            <code>/etc/gladios/settings.conf</code>. It never reloads nginx, and backs out if <code>nginx -t</code>
+            fails. <a href="/install.sh">Read it first</a>; run it again to upgrade.</p>
+        </div></li>
+        <li><div>
+          <h3>Guard a server</h3>
+<pre class="code"><code>server {
+    <span class="k">include snippets/gladios.conf;</span>
+    location /healthz { <span class="k">auth_request off;</span> }  <span class="c"># left out</span>
+}</code></pre>
+        </div></li>
+        <li><div>
+          <h3>Reload nginx</h3>
+          <div class="cmd">
+            <code id="reload-cmd">sudo nginx -t &amp;&amp; sudo systemctl reload nginx</code>
+            <button type="button" class="copy" data-copy="reload-cmd">Copy</button>
+          </div>
+        </div></li>
+      </ol>
+
+      <div class="two">
+        <div class="card">
+          <h3>Who gets checked</h3>
+          <p>Anything that can’t run a browser needs a bypass, in <code>/etc/gladios/settings.conf</code>:</p>
+<pre class="code"><code>map $request_uri $gladios_bypass {
+    default          0;
+    ~^/\.well-known/ 1;   <span class="c"># ACME and friends</span>
+    <span class="k">~^/api/          1;</span>
+}</code></pre>
+        </div>
+        <div class="card" id="requirements">
+          <h3>Requirements</h3>
+          <ul>
+            <li>nginx with njs 0.7.9+. On Ubuntu 22.04, use nginx.org’s packages.</li>
+            <li>HTTPS: the pass cookie is <code>Secure</code>.</li>
+            <li>Behind a proxy, <code>realip</code> restoring the client’s address.</li>
+            <li>Optional: fail2ban, and Python 3.8+ for ban notifications.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="performance">
+    <div class="wrap">
+      <h2 class="title">Tens of thousands of requests a second, on two cores</h2>
+      <p class="intro">The check runs inside the nginx worker that already has the request.</p>
+      <figure style="margin:0">
+        <table class="perf">
+          <thead>
+            <tr><th scope="col">Request</th><th scope="col">Most served</th><th scope="col">p50</th><th scope="col">CPU at 1,000 req/s</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>With a valid pass<small>checked, then the app’s page</small></td>
+              <td><div class="meter"><span class="bar" style="--v:.582"></span><span class="num">35–36k/s</span></div></td>
+              <td class="num" data-label="p50">1.7 ms</td>
+              <td class="num" data-label="CPU at 1k req/s">0.14 cores</td>
+            </tr>
+            <tr>
+              <td>With a forged pass<small>checked, challenge page, strike</small></td>
+              <td><div class="meter"><span class="bar" style="--v:.41"></span><span class="num">24–26k/s</span></div></td>
+              <td class="num" data-label="p50">2.4 ms</td>
+              <td class="num" data-label="CPU at 1k req/s">0.19 cores</td>
+            </tr>
+            <tr>
+              <td>Without a cookie<small>challenge page, nothing to check</small></td>
+              <td><div class="meter"><span class="bar" style="--v:.582"></span><span class="num">35–36k/s</span></div></td>
+              <td class="num" data-label="p50">1.7 ms</td>
+              <td class="num" data-label="CPU at 1k req/s">0.15–0.18 cores</td>
+            </tr>
+            <tr>
+              <td><code>GET /.gladios/api/challenge</code><small>unthrottled</small></td>
+              <td><div class="meter"><span class="bar" style="--v:.984"></span><span class="num">59–61k/s</span></div></td>
+              <td class="num" data-label="p50">1.0 ms</td>
+              <td class="num" data-label="CPU at 1k req/s">0.11–0.17 cores</td>
+            </tr>
+            <tr>
+              <td><code>POST /.gladios/api/verify</code><small>unthrottled</small></td>
+              <td><div class="meter"><span class="bar" style="--v:.795"></span><span class="num">47–50k/s</span></div></td>
+              <td class="num" data-label="p50">1.2 ms</td>
+              <td class="num" data-label="CPU at 1k req/s">0.12–0.13 cores</td>
+            </tr>
+          </tbody>
+        </table>
+        <figcaption>nginx pinned to 2 cores, <a href="https://github.com/hatoo/oha">oha</a> on others, TLS keep-alive,
+          64 connections; Debian 12’s nginx 1.22 and njs 0.7.9 in an Apple M1 Pro’s Linux VM. nginx’s three processes
+          took 11–12 MB. <code>test/bench/run.sh</code> runs it on yours.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="more">
+    <div class="wrap">
+      <div class="two" style="margin-top:0">
+        <div class="card">
+          <h3>Make it yours</h3>
+          <p>Drop a <code>mascot.webp</code> (or png, svg, jpg, gif) in <code>/etc/gladios/site/</code> to replace the
+            gladiator on <a href="/preview/">the default page</a>, or put a whole <code>index.html</code> of your own there.
+            Upgrades never touch it.</p>
+        </div>
+        <div class="card">
+          <h3>What it won’t do</h3>
+          <ul>
+            <li><strong>Stop a real headless browser.</strong> It pays the work, as with any check like this; per-network passes and rate limits make that costly at scale.</li>
+            <li><strong>Let visitors without JavaScript in.</strong></li>
+            <li><strong>Show monitors your app is down:</strong> the page answers 200, so bypass them.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/icon.png" width="26" height="26" alt="">gladios</a>
+    <span>MIT licensed, the gladiator included.</span>
+    <a class="sponsor" href="https://colyseus.io/"><svg aria-hidden="true"><use href="#colyseus"/></svg>Sponsored by <strong>Colyseus</strong></a>
+    <nav aria-label="Elsewhere">
+      <a href="https://github.com/endel/gladios">GitHub</a>
+      <a href="/install.sh">install.sh</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="/site.js" defer></script>
+</body>
+</html>
