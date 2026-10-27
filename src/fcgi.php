@@ -4,9 +4,11 @@
  * The FastCGI entry point. nginx picks the action with `fastcgi_param GLADIOS_ACTION`:
  *
  *   check      auth_request target: 204 with a valid pass cookie, else 401 (nginx then serves the
- *              challenge page itself)
+ *              challenge page itself). nginx only asks about cookies shaped like a pass.
  *   challenge  GET:  {challenge, difficulty, expires}
  *   verify     POST: expires, nonce (urlencoded). 204 + the pass cookie, or 403
+ *
+ * nginx also passes GLADIOS_COOKIE, the pass cookie's name ($gladios_cookie_name).
  *
  * Configuration, from the pool's `env[...]` or a fastcgi_param:
  *
@@ -54,13 +56,19 @@ try {
     gladios_respond(500);
 }
 
+$cookie = Gladios::cookieName($_SERVER['GLADIOS_COOKIE'] ?? null);
+if ($cookie === null) {
+    error_log('gladios: GLADIOS_COOKIE must be 1-64 of A-Z a-z 0-9 _ -');
+    gladios_respond(500);
+}
+
 $scope = Gladios::scope($_SERVER['REMOTE_ADDR'] ?? '');
 $now = time();
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
 switch ($_SERVER['GLADIOS_ACTION'] ?? '') {
     case 'check':
-        gladios_respond($gladios->valid($_COOKIE[Gladios::COOKIE] ?? null, $scope, $now) ? 204 : 401);
+        gladios_respond($gladios->valid($_COOKIE[$cookie] ?? null, $scope, $now) ? 204 : 401);
 
     case 'challenge':
         if ($method !== 'GET') {
@@ -81,7 +89,7 @@ switch ($_SERVER['GLADIOS_ACTION'] ?? '') {
             gladios_respond(403);
         }
         $pass = $gladios->pass($scope, $now);
-        setcookie(Gladios::COOKIE, $pass, [
+        setcookie($cookie, $pass, [
             'expires' => $now + $gladios->passTtl,
             'path' => '/',
             'domain' => gladios_env('GLADIOS_COOKIE_DOMAIN', ''),

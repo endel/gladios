@@ -1,0 +1,147 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * Posts a digest of fail2ban's latest bans to a webhook, so a false positive gets noticed and
+ * undone. cron.d/gladios-notify runs it every minute; fail2ban's gladios-notify action only appends
+ * to /var/log/gladios/bans.log.
+ *
+ * /etc/gladios/notify.conf (ini; root only, the URL is a secret):
+ *
+ *   webhook   = "https://hooks.slack.com/services/..."
+ *   format    = slack                                 ; slack, discord or json
+ *   samples[] = /var/log/nginx/gladios-strikes.log    ; logs to quote what a banned address sent
+ *   samples[] = /var/log/nginx/error.log
+ *
+ * The first DETAILED bans of each digest come with their latest lines from the sample logs; the
+ * rest are counted. A failed post is retried on the next run, together with what was banned since.
+ */
+
+declare(strict_types=1);
+
+const CONF = '/etc/gladios/notify.conf';
+const BANS = '/var/log/gladios/bans.log';
+const STATE = '/var/lib/gladios/notify.state';
+const DETAILED = 10;
+const SAMPLES_PER_BAN = 2;
+const SAMPLE_TAIL = 2 * 1024 * 1024; // bytes read from the end of each sample log
+
+// bytes, not characters: php-cli often comes without mbstring
+function cut(string $s, int $max): string
+{
+    return strlen($s) > $max ? substr($s, 0, $max) . '…' : $s;
+}
+
+$conf = is_readable(CONF) ? parse_ini_file(CONF, false, INI_SCANNER_RAW) : false;
+if (!$conf || empty($conf['webhook'])) {
+    exit(0);
+}
+$format = $conf['format'] ?? 'slack';
+if (!in_array($format, ['slack', 'discord', 'json'], true)) {
+    fwrite(STDERR, "gladios-notify: format must be slack, discord or json\n");
+    exit(1);
+}
+
+@mkdir(dirname(STATE), 0750, true);
+$lock = fopen(STATE . '.lock', 'c');
+if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
+    exit(0); // the previous run is still posting
+}
+
+clearstatcache();
+$stat = @stat(BANS);
+if (!$stat) {
+    exit(0);
+}
+$state = json_decode((string) @file_get_contents(STATE), true) ?: [];
+// rotated or truncated: start over
+if (($state['inode'] ?? null) !== $stat['ino'] || ($state['offset'] ?? 0) > $stat['size']) {
+    $state = ['inode' => $stat['ino'], 'offset' => 0];
+}
+
+$bans = [];
+$file = fopen(BANS, 'r');
+fseek($file, $state['offset']);
+while (($line = fgets($file)) !== false && str_ends_with($line, "\n")) {
+    $state['offset'] += strlen($line);
+    // <time> <jail> <address> <failures>, from fail2ban/action.d/gladios-notify.conf
+    [$time, $jail, $ip, $failures] = array_pad(explode(' ', trim($line)), 4, '');
+    if (filter_var($ip, FILTER_VALIDATE_IP)) {
+        $bans[] = ['time' => $time, 'jail' => $jail, 'ip' => $ip, 'failures' => (int) $failures, 'samples' => []];
+    }
+}
+fclose($file);
+if (!$bans) {
+    file_put_contents(STATE, json_encode($state));
+    exit(0);
+}
+
+$tails = [];
+foreach ((array) ($conf['samples'] ?? []) as $path) {
+    $size = @filesize($path);
+    if ($size === false || !($handle = @fopen($path, 'r'))) {
+        continue;
+    }
+    fseek($handle, max(0, $size - SAMPLE_TAIL));
+    $tails[] = explode("\n", (string) stream_get_contents($handle));
+    fclose($handle);
+}
+foreach (array_slice(array_keys($bans), 0, DETAILED) as $i) {
+    // the address as a whole token: 1.2.3.4 must not match 11.2.3.45
+    $pattern = '/(?<![0-9A-Fa-f.:])' . preg_quote($bans[$i]['ip'], '/') . '(?![0-9A-Fa-f.:])/';
+    foreach ($tails as $lines) {
+        $found = preg_grep($pattern, $lines);
+        foreach (array_slice($found, -SAMPLES_PER_BAN) as $sample) {
+            $bans[$i]['samples'][] = cut(preg_replace('/[\x00-\x1f\x7f]/', ' ', $sample), 240);
+        }
+    }
+}
+
+$host = gethostname() ?: 'unknown host';
+$perJail = array_count_values(array_column($bans, 'jail'));
+arsort($perJail);
+$count = count($bans);
+
+if ($format === 'json') {
+    $payload = ['host' => $host, 'total' => $count, 'per_jail' => $perJail, 'bans' => array_slice($bans, 0, DETAILED)];
+} else {
+    // attacker-controlled text (URLs, user agents) must not close a code span; on Slack, nor open a
+    // link or mention. Discord's mentions are off below.
+    $plain = fn (string $s): string => $format === 'slack'
+        ? str_replace(['&', '<', '>', '`'], ['&amp;', '&lt;', '&gt;', "'"], $s)
+        : str_replace('`', "'", $s);
+    $jails = implode(', ', array_map(fn ($jail, $n) => $plain((string) $jail) . " $n", array_keys($perJail), $perJail));
+    $lines = [($format === 'slack' ? '*gladios*' : '**gladios**') . ' on `' . $plain($host) . '`: '
+        . $count . ' address' . ($count === 1 ? '' : 'es') . " banned ($jails)"];
+    foreach (array_slice($bans, 0, DETAILED) as $ban) {
+        $lines[] = '• `' . $ban['ip'] . '` ' . $plain($ban['jail']) . ', ' . $ban['failures'] . ' hits, ' . $plain($ban['time']);
+        foreach ($ban['samples'] as $sample) {
+            $lines[] = '    `' . $plain($sample) . '`';
+        }
+    }
+    if ($count > DETAILED) {
+        $lines[] = '+' . number_format($count - DETAILED) . ' more.';
+    }
+    $lines[] = 'Unban: `fail2ban-client set ' . $plain($bans[0]['jail']) . ' unbanip ' . $bans[0]['ip'] . '`';
+    $text = implode("\n", $lines);
+    $payload = $format === 'slack'
+        ? ['text' => $text]
+        : ['content' => cut($text, 1990), 'allowed_mentions' => ['parse' => []]];
+}
+
+$context = stream_context_create(['http' => [
+    'method' => 'POST',
+    'header' => "Content-Type: application/json\r\n",
+    // a cut can split a character, and logs hold any bytes
+    'content' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
+    'timeout' => 10,
+    'ignore_errors' => true,
+]]);
+@file_get_contents($conf['webhook'], false, $context);
+$headers = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : ($http_response_header ?? null);
+$status = preg_match('#^HTTP/\S+ (\d{3})#', $headers[0] ?? '', $m) ? (int) $m[1] : 0;
+if ($status < 200 || $status >= 300) {
+    fwrite(STDERR, "gladios-notify: the webhook answered " . ($status ?: 'nothing') . "; retrying next run\n");
+    exit(1);
+}
+file_put_contents(STATE, json_encode($state));

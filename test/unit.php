@@ -74,6 +74,11 @@ check('pass: tampered mac', !$g->valid($exp . '.' . strrev($mac), '203.0.113.7',
 check('pass: missing', !$g->valid(null, '203.0.113.7', $now));
 check('pass: junk', !$g->valid('1.2.3', '203.0.113.7', $now));
 
+check('cookie name: default', Gladios::cookieName(null) === 'gladios' && Gladios::cookieName('') === 'gladios');
+check('cookie name: custom', Gladios::cookieName('site_check-2') === 'site_check-2');
+check('cookie name: PHP would mangle it', Gladios::cookieName('a.b') === null && Gladios::cookieName('a b') === null);
+check('cookie name: too long', Gladios::cookieName(str_repeat('a', 65)) === null);
+
 $rejects = 0;
 foreach (['short', ''] as $s) {
     try {

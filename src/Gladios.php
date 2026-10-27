@@ -18,6 +18,7 @@ namespace Gladios;
  */
 final class Gladios
 {
+    /** The pass cookie's name unless nginx says otherwise. */
     public const COOKIE = 'gladios';
 
     /** How long a browser has to solve a puzzle. */
@@ -34,6 +35,19 @@ final class Gladios
         if ($difficulty < 1 || $difficulty > 32) {
             throw new \InvalidArgumentException('difficulty must be 1-32 bits');
         }
+    }
+
+    /**
+     * The pass cookie's name, as nginx passes it (GLADIOS_COOKIE). Null when unusable: PHP mangles
+     * names with dots or spaces, and nginx would then look for a cookie PHP never sets.
+     */
+    public static function cookieName(?string $name): ?string
+    {
+        if ($name === null || $name === '') {
+            return self::COOKIE;
+        }
+
+        return preg_match('/^[A-Za-z0-9_-]{1,64}$/', $name) ? $name : null;
     }
 
     /** The network a puzzle or pass is bound to. */

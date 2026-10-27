@@ -41,10 +41,27 @@ expect "HEAD"                            "200 -"         "$(req HEAD / -I)"
 expect "page is never cached"            "no-store"      "$(req GET / > /dev/null; header cache-control)"
 expect "bypassed path (/api/)"           "200 app"       "$(req GET /api/thing)"
 expect "the host itself"                 "200"           "$(docker exec "$C" curl -sk -o /dev/null -w '%{http_code}' --resolve a.gladios.test:443:127.0.0.1 https://a.gladios.test/)"
-expect "forged pass"                     "200 challenge" "$(req GET / -H 'Cookie: gladios=1999999999.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')"
-expect "malformed pass"                  "200 challenge" "$(req GET / -H 'Cookie: gladios=nope')"
 expect "solver script"                   "200 -"         "$(req GET /.gladios/gladios.js)"
 expect "worker script"                   "200 -"         "$(req GET /.gladios/worker.js)"
+
+FORGED='1999999999.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+echo "== forged and malformed passes (cookie: gate)"
+strikes() { docker exec "$C" sh -c 'wc -l < /var/log/nginx/gladios-strikes.log'; }
+php_hits() { docker exec "$C" sh -c 'wc -l < /var/log/gladios-fpm.log'; }
+s0=$(strikes) p0=$(php_hits)
+expect "no cookie"                       "200 challenge" "$(req GET /)"
+expect "no cookie: no strike, no php"    "0 0"           "$(($(strikes) - s0)) $(($(php_hits) - p0))"
+s0=$(strikes) p0=$(php_hits)
+expect "malformed pass"                  "200 challenge" "$(req GET / -H 'Cookie: gate=nope')"
+expect "malformed: a strike, no php"     "1 0"           "$(($(strikes) - s0)) $(($(php_hits) - p0))"
+s0=$(strikes) p0=$(php_hits)
+expect "forged pass"                     "200 challenge" "$(req GET / -H "Cookie: gate=$FORGED")"
+expect "forged: a strike, checked by php" "1 1"          "$(($(strikes) - s0)) $(($(php_hits) - p0))"
+s0=$(strikes) p0=$(php_hits)
+expect "the default name, unused here"   "200 challenge" "$(req GET / -H "Cookie: gladios=$FORGED")"
+expect "  is just another cookie"        "0 0"           "$(($(strikes) - s0)) $(($(php_hits) - p0))"
+expect "strike line"                     "yes"           "$(docker exec "$C" tail -n 1 /var/log/nginx/gladios-strikes.log | grep -qE '^[0-9T:+-]+ strike [0-9a-f.:]+ a\.gladios\.test "GET /" ' && echo yes || echo no)"
+expect "fail2ban's filter reads it"      "yes"           "$(docker exec "$C" fail2ban-regex /var/log/nginx/gladios-strikes.log gladios | grep -qE '^Lines: .*[1-9][0-9]* matched' && echo yes || echo no)"
 
 echo "== solving with curl"
 jar=$tmp/jar
@@ -64,7 +81,7 @@ expect "wrong nonce"                     "403 -"         "$(req POST /.gladios/a
 expect "verify needs POST"               "405 -"         "$(req GET /.gladios/api/verify)"
 expect "challenge needs GET"             "405 -"         "$(req POST /.gladios/api/challenge -d x=1)"
 expect "right nonce"                     "204 -"         "$(req POST /.gladios/api/verify -c "$jar" --data "expires=$expires&nonce=$nonce")"
-expect "pass shared across gladios.test" "1"             "$(grep -cE $'^(#HttpOnly_)?\\.gladios\\.test\tTRUE\t/\tTRUE\t[0-9]+\tgladios\t' "$jar")"
+expect "pass named gate, for gladios.test" "1"           "$(grep -cE $'^(#HttpOnly_)?\\.gladios\\.test\tTRUE\t/\tTRUE\t[0-9]+\tgate\t' "$jar")"
 expect "with the pass"                   "200 app"       "$(req GET /some/page -b "$jar")"
 expect "same pass on the sibling host"   "200 app"       "$(ON=b.gladios.test req GET / -b "$jar")"
 
@@ -96,6 +113,40 @@ echo "== rate limit on /.gladios/api"
 codes=$(for _ in $(seq 60); do curl -sk -o /dev/null -w '%{http_code}\n' --resolve "a.gladios.test:$PORT:127.0.0.1" "https://a.gladios.test:$PORT/.gladios/api/challenge"; done | sort | uniq -c | tr -s ' ' | tr '\n' ' ')
 echo "      60 rapid challenges: $codes"
 expect "some 429s"                       "yes"           "$([[ $codes == *429* ]] && echo yes || echo no)"
+
+echo "== bans and their notification"
+hooks() { docker exec "$C" sh -c 'ls /tmp/hook-*.json 2> /dev/null | wc -l'; }
+notify() { docker exec "$C" php /opt/gladios/bin/gladios-notify; }
+conf() { docker exec "$C" sh -c "printf 'webhook = \"http://127.0.0.1:9999/hook\"\nformat = $1\nsamples[] = /var/log/nginx/gladios-strikes.log\n' > /etc/gladios/notify.conf"; }
+# what a forger would hope to slip into a chat: a mention and a broken code span
+UA='<!channel> `pwned` @everyone'
+for _ in $(seq 25); do curl -sk -o /dev/null -A "$UA" -H "Cookie: gate=$FORGED" --resolve "a.gladios.test:$PORT:127.0.0.1" "https://a.gladios.test:$PORT/"; done
+me=$(docker exec "$C" tail -n 1 /var/log/nginx/gladios-strikes.log | awk '{ print $3 }')
+for _ in $(seq 20); do docker exec "$C" fail2ban-client status gladios | grep -q "$me" && break; sleep 1; done
+expect "25 forged passes: banned"        "yes"           "$(docker exec "$C" fail2ban-client status gladios | grep -q "$me" && echo yes || echo no)"
+expect "recorded for the notifier"       "gladios $me"   "$(docker exec "$C" tail -n 1 /var/log/gladios/bans.log | awk '{ print $2, $3 }')"
+expect "no webhook configured: quiet"    "0"             "$(notify; hooks)"
+conf slack
+notify
+expect "slack: posted once"              "1"             "$(hooks)"
+slack=$(docker exec "$C" cat /tmp/hook-1.json)
+expect "  names the address"             "yes"           "$([[ $slack == *"\`$me\`"* ]] && echo yes || echo no)"
+expect "  quotes what it sent"           "yes"           "$([[ $slack == *'strike '"$me"' a.gladios.test'* ]] && echo yes || echo no)"
+expect "  defuses the mention"           "yes"           "$([[ $slack == *'&lt;!channel&gt;'* && $slack != *'<!channel>'* ]] && echo yes || echo no)"
+expect "  keeps code spans whole"        "yes"           "$([[ $slack == *"'pwned'"* ]] && echo yes || echo no)"
+expect "nothing new: no post"            "1"             "$(notify; hooks)"
+docker exec "$C" sh -c "echo '2026-01-01T00:00:00Z nginx-limit-req 203.0.113.9 60' >> /var/log/gladios/bans.log && touch /tmp/hook-fail"
+expect "webhook down: fails"             "1 1"           "$(notify 2> /dev/null; echo "$? $(hooks)")"
+docker exec "$C" rm /tmp/hook-fail
+conf json
+notify
+expect "  retried on the next run"       "2"             "$(hooks)"
+expect "json: the ban"                   "203.0.113.9 nginx-limit-req 1" "$(docker exec "$C" cat /tmp/hook-2.json | python3 -c 'import json, sys; p = json.load(sys.stdin); print(p["bans"][0]["ip"], p["bans"][0]["jail"], p["total"])')"
+conf discord
+docker exec "$C" sh -c "echo '2026-01-01T00:00:01Z gladios 203.0.113.10 20' >> /var/log/gladios/bans.log"
+notify
+expect "discord: no pings"               "[]"            "$(docker exec "$C" cat /tmp/hook-3.json | python3 -c 'import json, sys; print(json.load(sys.stdin)["allowed_mentions"]["parse"])')"
+docker exec "$C" sh -c 'fail2ban-client unban --all > /dev/null; rm -f /etc/gladios/notify.conf'
 
 echo
 [[ $fails == 0 ]] && echo "all checks passed" || echo "$fails checks FAILED"
