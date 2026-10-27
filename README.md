@@ -40,13 +40,13 @@ what make that expensive at scale. Visitors with JavaScript off can't pass.
 ## Requirements
 
 - nginx with `ngx_http_auth_request_module` (built in on Debian, Ubuntu and nginx.org packages) and
-  the njs module, 0.7.9 or newer:
+  the njs module, 0.7.9 or newer. `install.sh` installs and loads it on these:
 
   | nginx from | njs package | loaded by |
   |---|---|---|
   | Debian 12, 13; Ubuntu 24.04 | `libnginx-mod-http-js` | the package (`modules-enabled`) |
   | nginx.org's repository | `nginx-module-njs` | `load_module modules/ngx_http_js_module.so;` atop `nginx.conf` |
-  | Alpine | `nginx-mod-http-js` | the same `load_module` line |
+  | Alpine | `nginx-mod-http-js` | the package (`modules/`) |
   | the official `nginx` Docker image | already there | the same `load_module` line |
 
   Ubuntu 22.04's own nginx has none: use nginx.org's packages there.
@@ -62,40 +62,64 @@ The app you protect can be anything.
 njs/gladios.js         puzzles and passes, and the check, challenge and verify handlers
 public/                the default challenge page, solver, worker and illustration
 nginx/conf.d/          http level: $gladios_gate, strikes, the `gladios` limit_req zone
-nginx/snippets/        gladios-server.conf (locations), gladios-protect.conf (per location)
+nginx/snippets/        gladios.conf (a whole server), or gladios-server.conf and gladios-protect.conf
+nginx/settings.conf    the first /etc/gladios/settings.conf: who gets checked, and how
 fail2ban/              filter.d/gladios.conf (strikes), action.d/gladios-notify.conf (records bans)
 bin/gladios-notify     posts a digest of recent bans to a webhook (Python 3)
 cron.d/                runs it every minute, once /etc/gladios/notify.conf exists
-install.sh             copies all of the above under a root (/ or a config tree)
+install.sh             installs all of the above on this host, or copies it into a config tree
 test/                  unit tests (njs), a browser test, a Docker end-to-end setup, a benchmark
 ```
 
 ## Installing
 
 ```sh
-sudo ./install.sh /     # or vendor into a config tree: ./install.sh path/to/tree
+curl -fsSL https://gladios.dev/install.sh | sudo sh
 ```
 
-`install.sh` never touches `/etc/gladios`. Then, on the host:
+It gets njs loaded (installing the package from the table above if it's missing), copies gladios to
+`/opt/gladios` and its config to `/etc/nginx`, and writes `/etc/gladios/secret.conf` and
+`/etc/gladios/settings.conf` the first time. It never reloads nginx, and if `nginx -t` fails with the
+new files it puts the old ones back. Run it again to upgrade. From a checkout, `sudo ./install.sh`
+does the same, and `./install.sh path/to/tree` only copies the files into a tree that mirrors a
+host's `/`.
 
-1. **njs**, from the table above.
-2. **The secret**, as nginx config: nginx reads it as root, so it can stay root-only. A new one
-   voids every pass, so everyone solves once more.
-   ```sh
-   install -d -m 0755 /etc/gladios
-   (umask 077 && printf 'js_var $gladios_secret "%s";\n' "$(head -c 48 /dev/urandom | base64 -w0)" > /etc/gladios/secret.conf)
-   ```
-3. **nginx.** At http level:
-   ```nginx
-   map $host $gladios_enabled     { default 1; }               # the switch
-   map $host $gladios_cookie_name { default gladios; }         # the pass cookie (see below)
-   map $host $gladios_cookie      { default $cookie_gladios; } # its value: same name
-   map ... $gladios_bypass        { ... }                      # 1: never check (see below)
-   ```
-   Then `include snippets/gladios-server.conf;` in the server and
-   `include snippets/gladios-protect.conf;` in each location to protect.
-   [`test/e2e/site.conf`](test/e2e/site.conf) is a complete example.
-4. `nginx -t && systemctl reload nginx`
+Then, in each `server { }` to guard:
+
+```nginx
+include snippets/gladios.conf;
+```
+
+and `nginx -t && systemctl reload nginx`. Leave a location out with `auth_request off;` inside it. To
+check only some locations instead, include `snippets/gladios-server.conf` in the server and
+`snippets/gladios-protect.conf` in each of them. [`test/e2e/site.conf`](test/e2e/site.conf) does both.
+
+### Settings
+
+`/etc/gladios/settings.conf` is yours: installs and upgrades never touch it. nginx reads it at http
+level, so its maps can tell hosts, paths or anything else apart
+([`test/e2e/settings.conf`](test/e2e/settings.conf) is a fuller example):
+
+```nginx
+map $host $gladios_enabled     { default 1; }               # the switch
+map $request_uri $gladios_bypass { default 0; ~^/api/ 1; }  # 1: never check (see below)
+map $host $gladios_cookie_name { default gladios; }         # the pass cookie (see below)
+map $host $gladios_cookie      { default $cookie_gladios; } # its value: same name
+```
+
+Optional, in the same file:
+
+| Variable | Default | |
+|---|---|---|
+| `$gladios_difficulty` | `16` | leading zero bits; each +1 doubles the work |
+| `$gladios_pass_ttl` | `604800` | seconds a pass lasts |
+| `$gladios_cookie_domain` | this host | share one pass across sibling hosts, e.g. `example.com` |
+
+A setting out of range fails closed: visitors still get the check, the API answers 500, and
+nginx's error log says why.
+
+The secret is nginx config too, root-only (nginx reads its config as root). A new one voids every
+pass, so everyone solves once more: delete `/etc/gladios/secret.conf` and run the installer again.
 
 ### The cookie
 
@@ -155,19 +179,6 @@ their jail, hit count and latest lines from the sample logs, counts the rest, an
 command to unban. Text from requests (URLs, user agents) is escaped, so it can't mention anyone or
 post links. A failed post is retried on the next run.
 
-### Configuration
-
-Optional nginx variables, at http level like the others (`map $host $gladios_difficulty { default 18; }`):
-
-| Variable | Default | |
-|---|---|---|
-| `$gladios_difficulty` | `16` | leading zero bits; each +1 doubles the work |
-| `$gladios_pass_ttl` | `604800` | seconds a pass lasts |
-| `$gladios_cookie_domain` | this host | share one pass across sibling hosts, e.g. `example.com` |
-
-A setting out of range fails closed: visitors still get the check, the API answers 500, and
-nginx's error log says why.
-
 ## Making it yours
 
 Everything lives in `/etc/gladios/site/`, which `install.sh` and upgrades never touch.
@@ -189,13 +200,14 @@ While the check fails, `<body>` has the class `failed`: show the button then.
 
 ## Gotchas
 
-- `gladios-protect.conf` sets an `error_page`, which drops every `error_page` the location
-  inherited from its server. Repeat any it relies on.
+- A location with an `error_page` of its own doesn't inherit gladios's, so it answers the check
+  with a bare 401: add `error_page 401 = /.gladios/page;` to it. The other way round,
+  `gladios-protect.conf` sets an `error_page`, which drops every one the location inherited from its
+  server; repeat any it relies on.
 - An internal redirect back into a protected location runs the check again: `try_files $uri
   /index.html` checks twice whenever it falls back. Cheap, but a named location (`try_files $uri
   @app`) without the include checks once.
-- A new `njs/gladios.js` takes effect on an nginx reload. Without `/etc/gladios/secret.conf`,
-  `nginx -t` fails, so a reload never goes out half set up.
+- An upgrade takes effect on an nginx reload.
 - `/.gladios/api/*` is limited to 60 requests a minute per address (burst 30): a check is 2, and
   one address can be a whole office or carrier NAT. Tune `rate` in `conf.d/gladios.conf` and
   `burst` in `snippets/gladios-server.conf`. Its 429s are `limit_req` errors in error.log, so a

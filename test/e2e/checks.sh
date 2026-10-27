@@ -40,6 +40,9 @@ expect "anonymous POST"                  "200 challenge" "$(req POST /form -d a=
 expect "HEAD"                            "200 -"         "$(req HEAD / -I)"
 expect "page is never cached"            "no-store"      "$(req GET / > /dev/null; header cache-control)"
 expect "bypassed path (/api/)"           "200 app"       "$(req GET /api/thing)"
+expect "location with auth_request off"  "200 app"       "$(req GET /open/)"
+expect "per location: unchecked one"     "200 app"       "$(ON=c.gladios.test req GET /)"
+expect "per location: checked one"       "200 challenge" "$(ON=c.gladios.test req GET /members/)"
 expect "the host itself"                 "200"           "$(docker exec "$C" curl -sk -o /dev/null -w '%{http_code}' --resolve a.gladios.test:443:127.0.0.1 https://a.gladios.test/)"
 expect "solver script"                   "200 -"         "$(req GET /.gladios/gladios.js)"
 expect "worker script"                   "200 -"         "$(req GET /.gladios/worker.js)"
@@ -106,9 +109,10 @@ docker exec "$C" rm -rf /etc/gladios/site
 expect "default again once removed"      "Checking your browser" "$(req GET / > /dev/null; grep -o '<title>[^<]*' "$tmp/body" | sed 's/<title>//')"
 
 echo "== the switch"
-docker exec "$C" sed -i 's/default 1;/default 0;/' /etc/nginx/sites-enabled/gladios-test.conf && reload
+switch() { docker exec "$C" sed -i "/gladios_enabled/,/}/ s/default .;/default $1;/" /etc/gladios/settings.conf && reload; }
+switch 0
 expect "off: straight through"           "200 app"       "$(req GET /)"
-docker exec "$C" sed -i 's/default 0;/default 1;/' /etc/nginx/sites-enabled/gladios-test.conf && reload
+switch 1
 expect "on again"                        "200 challenge" "$(req GET /)"
 
 # drains the bucket: a re-run within ~30 s may get 429s while solving

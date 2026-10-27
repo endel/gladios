@@ -1,11 +1,8 @@
 #!/bin/bash
-# Sets the container up the way README.md's "Installing" does, then runs nginx.
+# The rest of the setup README.md's "Installing" describes (the image ran install.sh), then nginx.
 set -euo pipefail
 
-/gladios/install.sh / > /dev/null
-
-install -d -o root -g root -m 0755 /etc/gladios
-(umask 077 && printf 'js_var $gladios_secret "%s";\n' "$(head -c 48 /dev/urandom | base64 -w0)" > /etc/gladios/secret.conf)
+cp /gladios/test/e2e/settings.conf /etc/gladios/settings.conf
 
 # fail2ban with a ban action that only records: the container has no firewall to drive
 rm -f /etc/fail2ban/jail.d/defaults-debian.conf
@@ -29,7 +26,7 @@ python3 /gladios/test/e2e/receiver.py > /dev/null 2>&1 &
 
 mkdir -p /etc/ssl/gladios-test /var/www/app
 openssl req -x509 -newkey rsa:2048 -nodes -days 7 -subj /CN=a.gladios.test \
-    -addext 'subjectAltName=DNS:a.gladios.test,DNS:b.gladios.test' \
+    -addext 'subjectAltName=DNS:a.gladios.test,DNS:b.gladios.test,DNS:c.gladios.test' \
     -keyout /etc/ssl/gladios-test/key.pem -out /etc/ssl/gladios-test/cert.pem 2> /dev/null
 printf '<!doctype html>\n<title>app</title>\n<p>hello from the app</p>\n' > /var/www/app/index.html
 
