@@ -252,4 +252,7 @@ run it on yours.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The gladiator (`public/gladios.webp`) is under the same license.
+The code and documentation are MIT, see [LICENSE](LICENSE). The gladiator artwork isn't: it may be
+shown, unmodified, on gladios's challenge page and in material about gladios, and
+[LICENSE-ARTWORK.md](LICENSE-ARTWORK.md) has the rest. [Making it yours](#making-it-yours) swaps in
+your own image.

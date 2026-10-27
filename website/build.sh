@@ -12,6 +12,8 @@ mkdir -p "$out"
 cp website/index.html website/site.js website/_headers website/og.png website/icon.png website/favicon.png \
     website/apple-touch-icon.png website/favicon.ico public/gladios.webp "$out/"
 cp install.sh "$out/"
+cp LICENSE "$out/license.txt"
+cp LICENSE-ARTWORK.md "$out/license-artwork.txt"
 
 # the challenge page's files where nginx serves them: the demo and the preview run the real thing
 mkdir -p "$out/.gladios" "$out/preview"
@@ -25,7 +27,7 @@ grep -q preview.js "$out/preview/index.html" || { echo "build: no gladios.js scr
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir "$stage/gladios"
-cp -R README.md LICENSE install.sh njs public nginx bin fail2ban cron.d "$stage/gladios/"
+cp -R README.md LICENSE LICENSE-ARTWORK.md install.sh njs public nginx bin fail2ban cron.d "$stage/gladios/"
 # ustar and no AppleDouble files: busybox and GNU tar extract it without complaint
 COPYFILE_DISABLE=1 tar --format=ustar -czf "$out/gladios.tar.gz" -C "$stage" gladios
 echo "built $out"
