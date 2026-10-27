@@ -1,0 +1,83 @@
+#!/bin/sh
+# The check's switch for this host (/etc/gladios/switch.conf), as root:
+#
+#   gladios-gate                 what it is: on or off, and pinned or auto
+#   gladios-gate on | off        pinned: gladios-auto leaves it alone
+#   gladios-gate auto            gladios-auto turns it on while the backend is overloaded
+#   gladios-gate set on | off    flips it and keeps the mode: what gladios-auto runs
+#
+# A flip is live after a graceful nginx reload; if nginx -t fails with it, the old file stays.
+# POSIX sh, like install.sh.
+set -eu
+
+SWITCH=${GLADIOS_SWITCH:-/etc/gladios/switch.conf}
+
+fail() {
+    echo "gladios-gate: $*" >&2
+    exit 1
+}
+
+mode() { sed -n 's/^# mode: //p' "$SWITCH" | head -n 1; }
+state() { if grep -Eq '^map .*default[[:space:]]+1;' "$SWITCH"; then echo on; else echo off; fi; }
+status() {
+    case $(mode) in
+        auto) echo "gladios: check $(state) (auto)" ;;
+        *) echo "gladios: check $(state) (pinned)" ;;
+    esac
+}
+
+reload() {
+    if [ -d /run/systemd/system ] && systemctl -q is-active nginx 2> /dev/null; then
+        systemctl reload nginx
+    else
+        # quiet unless it fails: it always notes that it signalled
+        out=$(nginx -s reload 2>&1) || { echo "$out" >&2; return 1; }
+    fi
+}
+
+# write <mode> <on|off>
+write() {
+    local value=0
+    [ "$2" = on ] && value=1
+    {
+        sed -n '/^# mode: /q; p' "$SWITCH"
+        echo "# mode: $1"
+        echo "map \$host \$gladios_switch { default $value; }"
+    } > "$SWITCH.new"
+    chmod 0644 "$SWITCH.new"
+    if [ "$(state)" = "$2" ]; then
+        mv "$SWITCH.new" "$SWITCH"
+        return
+    fi
+    cp -p "$SWITCH" "$SWITCH.old"
+    mv "$SWITCH.new" "$SWITCH"
+    if out=$(nginx -t -q 2>&1); then
+        rm -f "$SWITCH.old"
+        reload
+    else
+        mv "$SWITCH.old" "$SWITCH"
+        echo "$out" >&2
+        fail "nginx -t fails, so the check stays $(state)"
+    fi
+}
+
+[ -f "$SWITCH" ] || fail "no $SWITCH: install gladios first (install.sh)"
+case ${1:-status} in
+    status) status; exit 0 ;;
+    on | off | auto) ;;
+    set) case ${2:-} in on | off) ;; *) fail "usage: gladios-gate set on|off" ;; esac ;;
+    *) echo "usage: gladios-gate [on | off | auto | status]" >&2; exit 64 ;;
+esac
+[ "$(id -u)" = 0 ] || fail "run it as root"
+
+case $1 in
+    on | off) write "$1" "$1" ;;
+    auto)
+        write auto "$(state)"
+        if [ -d /run/systemd/system ] && ! systemctl -q is-active gladios-auto 2> /dev/null; then
+            echo "gladios-auto isn't running, so nothing switches yet: systemctl enable --now gladios-auto" >&2
+        fi
+        ;;
+    set) write "$(mode)" "$2" ;;
+esac
+status

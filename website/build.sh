@@ -27,7 +27,7 @@ grep -q preview.js "$out/preview/index.html" || { echo "build: no gladios.js scr
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir "$stage/gladios"
-cp -R README.md LICENSE LICENSE-ARTWORK.md install.sh njs public nginx bin fail2ban cron.d "$stage/gladios/"
+cp -R README.md LICENSE LICENSE-ARTWORK.md install.sh njs public nginx bin fail2ban cron.d systemd "$stage/gladios/"
 # ustar and no AppleDouble files: busybox and GNU tar extract it without complaint
 COPYFILE_DISABLE=1 tar --format=ustar -czf "$out/gladios.tar.gz" -C "$stage" gladios
 echo "built $out"

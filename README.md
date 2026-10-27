@@ -64,8 +64,12 @@ public/                the default challenge page, solver, worker and illustrati
 nginx/conf.d/          http level: $gladios_gate, strikes, the `gladios` limit_req zone
 nginx/snippets/        gladios.conf (a whole server), or gladios-server.conf and gladios-protect.conf
 nginx/settings.conf    the first /etc/gladios/settings.conf: who gets checked, and how
+nginx/switch.conf      the first /etc/gladios/switch.conf: on, until gladios-gate says otherwise
 fail2ban/              filter.d/gladios.conf (strikes), action.d/gladios-notify.conf (records bans)
 bin/gladios-notify     posts a digest of recent bans to a webhook (Python 3)
+bin/gladios-gate       turns the check on or off, or hands it to gladios-auto (sh)
+bin/gladios-auto       turns it on only while the backend is overloaded (Python 3)
+systemd/               runs gladios-auto as a service
 cron.d/                runs it every minute, once /etc/gladios/notify.conf exists
 install.sh             installs all of the above on this host, or copies it into a config tree
 test/                  unit tests (njs), a browser test, Docker end-to-end and install tests, a benchmark
@@ -79,8 +83,8 @@ curl -fsSL https://gladios.dev/install.sh | sudo sh
 ```
 
 It gets njs loaded (installing the package from the table above if it's missing), copies gladios to
-`/opt/gladios` and its config to `/etc/nginx`, and writes `/etc/gladios/secret.conf` and
-`/etc/gladios/settings.conf` the first time. It never reloads nginx, and if `nginx -t` fails with the
+`/opt/gladios` and its config to `/etc/nginx`, links `gladios-gate` into `/usr/local/sbin`, and
+writes `/etc/gladios/secret.conf`, `settings.conf` and `switch.conf` the first time. It never reloads nginx, and if `nginx -t` fails with the
 new files it puts the old ones back. Run it again to upgrade. From a checkout, `sudo ./install.sh`
 does the same, and `./install.sh path/to/tree` only copies the files into a tree that mirrors a
 host's `/`.
@@ -102,7 +106,7 @@ level, so its maps can tell hosts, paths or anything else apart
 ([`test/e2e/settings.conf`](test/e2e/settings.conf) is a fuller example):
 
 ```nginx
-map $host $gladios_enabled     { default 1; }               # the switch
+map $host $gladios_enabled     { default 1; }               # 0: never check (this host, say)
 map $request_uri $gladios_bypass { default 0; ~^/api/ 1; }  # 1: never check (see below)
 map $host $gladios_cookie_name { default gladios; }         # the pass cookie (see below)
 map $host $gladios_cookie      { default $cookie_gladios; } # its value: same name
@@ -180,6 +184,51 @@ their jail, hit count and latest lines from the sample logs, counts the rest, an
 command to unban. Text from requests (URLs, user agents) is escaped, so it can't mention anyone or
 post links. A failed post is retried on the next run.
 
+## Only during floods
+
+The check can stay off until the backend is overloaded, so visitors and search engines don't meet
+it on an ordinary day. `gladios-gate` is the switch (as root):
+
+```sh
+gladios-gate              # gladios: check on (pinned)
+gladios-gate off          # off, pinned: nobody gets checked
+gladios-gate on           # on, pinned
+gladios-gate auto         # gladios-auto decides
+```
+
+Each flip is `nginx -t`'d and live after a graceful reload. `settings.conf`'s `$gladios_enabled`
+still says where the check applies; the switch says whether it runs at all. Fresh installs start
+on, pinned, as before.
+
+`gladios-auto` turns the check on once the backend has been overloaded for 10 s, and off after
+15 min on and 15 min calm. Calm means not overloaded and under 300 check pages a minute, which
+nginx logs to `gladios.log`, so a flood that's still being answered with check pages keeps it on.
+Tell it what overloaded means in `/etc/gladios/auto.conf`:
+
+```ini
+; a php-fpm pool: overloaded when no worker is idle and fpm_max are busy
+fpm_status = http://127.0.0.1/fpm-status?json   ; the pool's status page (pm.status_path)
+fpm_max    = 6                                  ; its pm.max_children
+; or any command, overloaded while it exits 0
+; probe    = /usr/local/bin/overloaded
+; and, optionally, the timings (seconds) above
+; on_after = 10
+; min_on = 900
+; quiet = 900
+; quiet_rate = 300
+```
+
+then `systemctl enable --now gladios-auto` and `gladios-gate auto`. `gladios-gate on|off` pins the
+check by hand at any time, and `gladios-auto` leaves it alone until `auto` again. Each switch it
+makes goes to the journal and to `notify.conf`'s webhook, if there is one.
+
+Point `fpm_status` at a status page with its own process: php-fpm answers `pm.status_path` from the
+pool's workers, so while a flood holds them all, the page queues behind it. With
+`pm.status_listen = /run/php/fpm-www-status.sock` in the pool, a location like
+`fastcgi_pass unix:/run/php/fpm-www-status.sock;` (with `SCRIPT_NAME` and `SCRIPT_FILENAME` set to
+the status path) answers at once. Until the check comes on, the overloaded backend answers as it
+would without gladios, so keep `on_after` short.
+
 ## Making it yours
 
 Everything lives in `/etc/gladios/site/`, which `install.sh` and upgrades never touch.
@@ -230,7 +279,8 @@ test/bench/run.sh           # Docker: load test, see Performance
 container from `test/e2e/site.conf`. It asserts who gets checked, solves a check with curl, mints a
 pass by hand from the scheme above, swaps in a custom mascot and page, flips the switch, trips the
 rate limit, then gets an address banned for forged passes and checks the notifications (Slack,
-Discord, JSON, a webhook that's down). Then `test/browser.mjs` takes Chromium and Firefox through
+Discord, JSON, a webhook that's down). Last, `gladios-gate` and `gladios-auto` on short timers,
+against a php-fpm status page and a probe it toggles. Then `test/browser.mjs` takes Chromium and Firefox through
 the check in light and dark, plus the failure state and retry.
 
 ## Performance

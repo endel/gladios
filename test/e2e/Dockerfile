@@ -13,6 +13,7 @@ COPY nginx /gladios/nginx
 COPY bin /gladios/bin
 COPY fail2ban /gladios/fail2ban
 COPY cron.d /gladios/cron.d
+COPY systemd /gladios/systemd
 COPY test/unit.js test/solve.py /gladios/test/
 COPY test/e2e /gladios/test/e2e
 RUN /gladios/install.sh > /dev/null

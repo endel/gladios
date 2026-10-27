@@ -40,13 +40,19 @@ for image in "${images[@]}"; do
         echo '-- served'
         curl -s localhost:8080/ | grep -o 'Checking your browser'
         curl -s localhost:8080/.gladios/api/challenge | grep -o '\"difficulty\":16'
+        echo '-- the switch'
+        gladios-gate off && sleep 1
+        curl -s localhost:8080/ | grep -o 'hello from the app'
+        gladios-gate on && sleep 1
+        curl -s localhost:8080/ | grep -o 'Checking your browser'
         echo '-- upgrade'
         echo '# mine' >> /etc/gladios/settings.conf
         GLADIOS_URL=file:///dist/gladios.tar.gz sh < /dist/install.sh
         tail -n 1 /etc/gladios/settings.conf
     " 2>&1) && status=0 || status=$?
     echo "$out" | sed 's/^/    /'
-    for want in 'gladios is installed' 'Checking your browser' '"difficulty":16' 'gladios is upgraded' '# mine'; do
+    for want in 'gladios is installed' 'Checking your browser' '"difficulty":16' 'check off (pinned)' 'hello from the app' \
+        'check on (pinned)' 'gladios is upgraded' '# mine'; do
         if [[ $status != 0 || $out != *"$want"* ]]; then
             echo "FAIL  $image: no '$want' (exit $status)"
             fails=$((fails + 1))

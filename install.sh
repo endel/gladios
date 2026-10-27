@@ -33,12 +33,17 @@ copy() {
         "$dest/etc/cron.d"
     install -m 0644 "$src/njs/gladios.js" "$dest/opt/gladios/njs/"
     install -m 0644 "$src/public/index.html" "$src/public/gladios.js" "$src/public/worker.js" "$src/public/gladios.webp" "$dest/opt/gladios/public/"
-    install -m 0755 "$src/bin/gladios-notify" "$dest/opt/gladios/bin/"
+    install -m 0755 "$src/bin/gladios-notify" "$src/bin/gladios-gate" "$src/bin/gladios-auto" "$dest/opt/gladios/bin/"
     install -m 0644 "$src/nginx/conf.d/gladios.conf" "$dest/etc/nginx/$http/"
     install -m 0644 "$src/nginx/snippets/gladios.conf" "$src/nginx/snippets/gladios-server.conf" "$src/nginx/snippets/gladios-protect.conf" "$dest/etc/nginx/snippets/"
     install -m 0644 "$src/fail2ban/filter.d/gladios.conf" "$dest/etc/fail2ban/filter.d/"
     install -m 0644 "$src/fail2ban/action.d/gladios-notify.conf" "$dest/etc/fail2ban/action.d/"
     install -m 0644 "$src/cron.d/gladios-notify" "$dest/etc/cron.d/"
+    # gladios-auto's unit: into any tree (it may be a host's config), and on a host run by systemd
+    if [ "$dest" != / ] || [ -d /run/systemd/system ]; then
+        install -d "$dest/etc/systemd/system"
+        install -m 0644 "$src/systemd/gladios-auto.service" "$dest/etc/systemd/system/"
+    fi
 }
 
 # nginx -T prints every file it reads, the distro's modules-enabled/*.conf included
@@ -85,13 +90,15 @@ need_njs() {
     njs_loaded || fail "nginx still doesn't load njs: check $conf"
 }
 
-# The secret and the settings: written once, then the host's own
+# The secret, the settings and the switch (on, as gladios-gate leaves it): written once, then the
+# host's own
 etc_gladios() {
     install -d -m 0755 /etc/gladios
     if [ ! -e /etc/gladios/secret.conf ]; then
         (umask 077 && printf 'js_var $gladios_secret "%s";\n' "$(head -c 48 /dev/urandom | base64 | tr -d '\n')" > /etc/gladios/secret.conf)
     fi
     [ -e /etc/gladios/settings.conf ] || install -m 0644 "$1/nginx/settings.conf" /etc/gladios/settings.conf
+    [ -e /etc/gladios/switch.conf ] || install -m 0644 "$1/nginx/switch.conf" /etc/gladios/switch.conf
 }
 
 # Where http-level config goes: conf.d/, but Alpine's nginx reads that at the top level and http.d/
@@ -152,6 +159,13 @@ host() {
         fail "nginx -t fails with this version (errors above), so the files it replaced are back"
     fi
     rm -rf "$saved"
+    install -d /usr/local/sbin
+    ln -sf /opt/gladios/bin/gladios-gate /usr/local/sbin/gladios-gate
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        # an upgrade's gladios-auto runs from here on, if it ran before
+        systemctl try-restart gladios-auto
+    fi
 
     echo
     if ! nginx -T 2> /dev/null | grep -q "^# configuration file /etc/nginx/$http/gladios.conf:"; then

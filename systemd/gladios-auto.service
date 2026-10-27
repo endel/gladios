@@ -1,0 +1,18 @@
+# /etc/systemd/system/gladios-auto.service
+#
+# Turns the browser check on while the backend is overloaded and off once it's calm again
+# (/opt/gladios/bin/gladios-auto, /etc/gladios/auto.conf). It acts after `gladios-gate auto`.
+#
+#   systemctl enable --now gladios-auto
+
+[Unit]
+Description=gladios-auto: the browser check while the backend is overloaded
+After=nginx.service
+
+[Service]
+ExecStart=/opt/gladios/bin/gladios-auto
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -155,6 +155,53 @@ notify
 expect "discord: no pings"               "[]"            "$(docker exec "$C" cat /tmp/hook-3.json | python3 -c 'import json, sys; print(json.load(sys.stdin)["allowed_mentions"]["parse"])')"
 docker exec "$C" sh -c 'fail2ban-client unban --all > /dev/null; rm -f /etc/gladios/notify.conf'
 
+echo "== gladios-gate and gladios-auto"
+gate() { docker exec "$C" gladios-gate "$@"; }
+# until gladios-gate says $1, for 20 s at most
+until_gate() { for _ in $(seq 40); do [[ $(gate) == "$1" ]] && break; sleep 0.5; done; gate; }
+expect "as installed"                    "gladios: check on (pinned)"  "$(gate)"
+expect "off"                             "gladios: check off (pinned)" "$(gate off)"
+sleep 1
+expect "  straight through"              "200 app"       "$(req GET /)"
+gate on > /dev/null && sleep 1
+expect "on: checked again"               "200 challenge" "$(req GET /)"
+docker exec "$C" sh -c 'cp /etc/gladios/settings.conf /tmp/settings.conf && echo broken >> /etc/gladios/settings.conf'
+expect "nginx -t failing: no flip"       "1 gladios: check on (pinned)" "$(gate off > /dev/null 2>&1; echo "$? $(gate)")"
+docker exec "$C" cp /tmp/settings.conf /etc/gladios/settings.conf
+
+# a php-fpm status page the checks rewrite, a webhook, and gladios-auto on short timers
+fpm() { docker exec "$C" sh -c "printf '{\"pool\": \"www\", \"idle processes\": $1, \"active processes\": $2}' > /tmp/fpm/status.json"; }
+auto_conf() { docker exec "$C" sh -c "printf '$1\non_after = 1\nmin_on = 1\nquiet = 1\nquiet_rate = 100000\npoll = 0.5\n' > /etc/gladios/auto.conf"; }
+docker exec "$C" sh -c 'mkdir -p /tmp/fpm; rm -f /tmp/hook-*.json'
+fpm 2 1
+docker exec -d "$C" sh -c 'echo $$ > /tmp/fpm.pid; exec python3 -m http.server 9998 --bind 127.0.0.1 --directory /tmp/fpm'
+auto_conf 'fpm_status = http://127.0.0.1:9998/status.json\nfpm_max = 6'
+conf slack
+docker exec -d "$C" sh -c 'echo $$ > /tmp/auto.pid; exec /opt/gladios/bin/gladios-auto > /tmp/auto.log 2>&1'
+expect "auto"                            "gladios: check on (auto)"    "$(gate auto 2> /dev/null)"
+expect "  calm: turned off"              "gladios: check off (auto)"   "$(until_gate 'gladios: check off (auto)')"
+fpm 0 6
+expect "  php-fpm full: turned on"       "gladios: check on (auto)"    "$(until_gate 'gladios: check on (auto)')"
+sleep 1
+expect "  checked"                       "200 challenge" "$(req GET /)"
+expect "  posted"                        "the check is ON, php-fpm's www has no idle worker (6 busy)" \
+    "$(docker exec "$C" sh -c 'for f in /tmp/hook-*.json; do cat "$f"; echo; done' |
+        python3 -c 'import json, sys; print(*(t.split(": ", 1)[1].split(" for ")[0] for t in (json.loads(l)["text"] for l in sys.stdin) if " ON" in t))')"
+fpm 2 1
+expect "  calm again: turned off"        "gladios: check off (auto)"   "$(until_gate 'gladios: check off (auto)')"
+auto_conf 'probe = test -e /tmp/overloaded'
+docker exec "$C" touch /tmp/overloaded
+expect "  probe exits 0: turned on"      "gladios: check on (auto)"    "$(until_gate 'gladios: check on (auto)')"
+docker exec "$C" rm /tmp/overloaded
+expect "  probe fails: turned off"       "gladios: check off (auto)"   "$(until_gate 'gladios: check off (auto)')"
+gate off > /dev/null
+docker exec "$C" touch /tmp/overloaded
+sleep 3
+expect "pinned off: overloaded, stays"   "gladios: check off (pinned)" "$(gate)"
+[[ $fails == 0 ]] || docker exec "$C" cat /tmp/auto.log
+docker exec "$C" sh -c 'kill $(cat /tmp/auto.pid) $(cat /tmp/fpm.pid); rm -f /tmp/overloaded /etc/gladios/auto.conf /etc/gladios/notify.conf'
+gate on > /dev/null
+
 echo
 [[ $fails == 0 ]] && echo "all checks passed" || echo "$fails checks FAILED"
 exit $((fails > 0))
