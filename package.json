@@ -4,7 +4,8 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "php test/unit.php",
+    "test": "test/e2e/run.sh",
+    "bench": "test/bench/run.sh",
     "test:browser": "node test/browser.mjs"
   },
   "devDependencies": {

@@ -1,147 +1,181 @@
-#!/usr/bin/env php
-<?php
+#!/usr/bin/env python3
+"""
+Posts a digest of fail2ban's latest bans to a webhook, so a false positive gets noticed and undone.
+cron.d/gladios-notify runs it every minute; fail2ban's gladios-notify action only appends to
+/var/log/gladios/bans.log. Python 3.8+ and its standard library only: fail2ban runs on it already.
 
-/**
- * Posts a digest of fail2ban's latest bans to a webhook, so a false positive gets noticed and
- * undone. cron.d/gladios-notify runs it every minute; fail2ban's gladios-notify action only appends
- * to /var/log/gladios/bans.log.
- *
- * /etc/gladios/notify.conf (ini; root only, the URL is a secret):
- *
- *   webhook   = "https://hooks.slack.com/services/..."
- *   format    = slack                                 ; slack, discord or json
- *   samples[] = /var/log/nginx/gladios-strikes.log    ; logs to quote what a banned address sent
- *   samples[] = /var/log/nginx/error.log
- *
- * The first DETAILED bans of each digest come with their latest lines from the sample logs; the
- * rest are counted. A failed post is retried on the next run, together with what was banned since.
- */
+/etc/gladios/notify.conf (root only, the URL is a secret):
 
-declare(strict_types=1);
+  webhook   = "https://hooks.slack.com/services/..."
+  format    = slack                                 ; slack, discord or json
+  samples[] = /var/log/nginx/gladios-strikes.log    ; logs to quote what a banned address sent
+  samples[] = /var/log/nginx/error.log
 
-const CONF = '/etc/gladios/notify.conf';
-const BANS = '/var/log/gladios/bans.log';
-const STATE = '/var/lib/gladios/notify.state';
-const DETAILED = 10;
-const SAMPLES_PER_BAN = 2;
-const SAMPLE_TAIL = 2 * 1024 * 1024; // bytes read from the end of each sample log
+The first DETAILED bans of each digest come with their latest lines from the sample logs; the rest
+are counted. A failed post is retried on the next run, together with what was banned since.
+"""
 
-// bytes, not characters: php-cli often comes without mbstring
-function cut(string $s, int $max): string
-{
-    return strlen($s) > $max ? substr($s, 0, $max) . '…' : $s;
-}
+import fcntl
+import ipaddress
+import json
+import os
+import re
+import socket
+import sys
+import urllib.error
+import urllib.request
+from collections import Counter
 
-$conf = is_readable(CONF) ? parse_ini_file(CONF, false, INI_SCANNER_RAW) : false;
-if (!$conf || empty($conf['webhook'])) {
-    exit(0);
-}
-$format = $conf['format'] ?? 'slack';
-if (!in_array($format, ['slack', 'discord', 'json'], true)) {
-    fwrite(STDERR, "gladios-notify: format must be slack, discord or json\n");
-    exit(1);
-}
+CONF = '/etc/gladios/notify.conf'
+BANS = '/var/log/gladios/bans.log'
+STATE = '/var/lib/gladios/notify.state'
+DETAILED = 10
+SAMPLES_PER_BAN = 2
+SAMPLE_TAIL = 2 * 1024 * 1024  # bytes read from the end of each sample log
 
-@mkdir(dirname(STATE), 0750, true);
-$lock = fopen(STATE . '.lock', 'c');
-if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
-    exit(0); // the previous run is still posting
-}
 
-clearstatcache();
-$stat = @stat(BANS);
-if (!$stat) {
-    exit(0);
-}
-$state = json_decode((string) @file_get_contents(STATE), true) ?: [];
-// rotated or truncated: start over
-if (($state['inode'] ?? null) !== $stat['ino'] || ($state['offset'] ?? 0) > $stat['size']) {
-    $state = ['inode' => $stat['ino'], 'offset' => 0];
-}
+def read_conf(path):
+    """key = value lines; `samples[]` may repeat. Quotes and ;/# comments as in an ini file."""
+    conf = {'samples': []}
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            m = re.match(r'\s*([A-Za-z_]+)(\[\])?\s*=\s*(.*?)\s*$', line)
+            if not m:
+                continue
+            value = m.group(3)
+            if value[:1] in ('"', "'"):
+                end = value.find(value[0], 1)
+                value = value[1:end] if end > 0 else value[1:]
+            else:
+                value = re.split(r'\s[;#]', value, maxsplit=1)[0].strip()
+            if m.group(2):
+                conf.setdefault(m.group(1), []).append(value)
+            else:
+                conf[m.group(1)] = value
+    return conf
 
-$bans = [];
-$file = fopen(BANS, 'r');
-fseek($file, $state['offset']);
-while (($line = fgets($file)) !== false && str_ends_with($line, "\n")) {
-    $state['offset'] += strlen($line);
-    // <time> <jail> <address> <failures>, from fail2ban/action.d/gladios-notify.conf
-    [$time, $jail, $ip, $failures] = array_pad(explode(' ', trim($line)), 4, '');
-    if (filter_var($ip, FILTER_VALIDATE_IP)) {
-        $bans[] = ['time' => $time, 'jail' => $jail, 'ip' => $ip, 'failures' => (int) $failures, 'samples' => []];
-    }
-}
-fclose($file);
-if (!$bans) {
-    file_put_contents(STATE, json_encode($state));
-    exit(0);
-}
 
-$tails = [];
-foreach ((array) ($conf['samples'] ?? []) as $path) {
-    $size = @filesize($path);
-    if ($size === false || !($handle = @fopen($path, 'r'))) {
-        continue;
-    }
-    fseek($handle, max(0, $size - SAMPLE_TAIL));
-    $tails[] = explode("\n", (string) stream_get_contents($handle));
-    fclose($handle);
-}
-foreach (array_slice(array_keys($bans), 0, DETAILED) as $i) {
-    // the address as a whole token: 1.2.3.4 must not match 11.2.3.45
-    $pattern = '/(?<![0-9A-Fa-f.:])' . preg_quote($bans[$i]['ip'], '/') . '(?![0-9A-Fa-f.:])/';
-    foreach ($tails as $lines) {
-        $found = preg_grep($pattern, $lines);
-        foreach (array_slice($found, -SAMPLES_PER_BAN) as $sample) {
-            $bans[$i]['samples'][] = cut(preg_replace('/[\x00-\x1f\x7f]/', ' ', $sample), 240);
-        }
-    }
-}
+def cut(s, limit):
+    return s[:limit] + '…' if len(s) > limit else s
 
-$host = gethostname() ?: 'unknown host';
-$perJail = array_count_values(array_column($bans, 'jail'));
-arsort($perJail);
-$count = count($bans);
 
-if ($format === 'json') {
-    $payload = ['host' => $host, 'total' => $count, 'per_jail' => $perJail, 'bans' => array_slice($bans, 0, DETAILED)];
-} else {
-    // attacker-controlled text (URLs, user agents) must not close a code span; on Slack, nor open a
-    // link or mention. Discord's mentions are off below.
-    $plain = fn (string $s): string => $format === 'slack'
-        ? str_replace(['&', '<', '>', '`'], ['&amp;', '&lt;', '&gt;', "'"], $s)
-        : str_replace('`', "'", $s);
-    $jails = implode(', ', array_map(fn ($jail, $n) => $plain((string) $jail) . " $n", array_keys($perJail), $perJail));
-    $lines = [($format === 'slack' ? '*gladios*' : '**gladios**') . ' on `' . $plain($host) . '`: '
-        . $count . ' address' . ($count === 1 ? '' : 'es') . " banned ($jails)"];
-    foreach (array_slice($bans, 0, DETAILED) as $ban) {
-        $lines[] = '• `' . $ban['ip'] . '` ' . $plain($ban['jail']) . ', ' . $ban['failures'] . ' hits, ' . $plain($ban['time']);
-        foreach ($ban['samples'] as $sample) {
-            $lines[] = '    `' . $plain($sample) . '`';
-        }
-    }
-    if ($count > DETAILED) {
-        $lines[] = '+' . number_format($count - DETAILED) . ' more.';
-    }
-    $lines[] = 'Unban: `fail2ban-client set ' . $plain($bans[0]['jail']) . ' unbanip ' . $bans[0]['ip'] . '`';
-    $text = implode("\n", $lines);
-    $payload = $format === 'slack'
-        ? ['text' => $text]
-        : ['content' => cut($text, 1990), 'allowed_mentions' => ['parse' => []]];
-}
+def main():
+    try:
+        conf = read_conf(CONF)
+    except OSError:
+        return 0
+    if not conf.get('webhook'):
+        return 0
+    fmt = conf.get('format', 'slack')
+    if fmt not in ('slack', 'discord', 'json'):
+        print('gladios-notify: format must be slack, discord or json', file=sys.stderr)
+        return 1
 
-$context = stream_context_create(['http' => [
-    'method' => 'POST',
-    'header' => "Content-Type: application/json\r\n",
-    // a cut can split a character, and logs hold any bytes
-    'content' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
-    'timeout' => 10,
-    'ignore_errors' => true,
-]]);
-@file_get_contents($conf['webhook'], false, $context);
-$headers = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : ($http_response_header ?? null);
-$status = preg_match('#^HTTP/\S+ (\d{3})#', $headers[0] ?? '', $m) ? (int) $m[1] : 0;
-if ($status < 200 || $status >= 300) {
-    fwrite(STDERR, "gladios-notify: the webhook answered " . ($status ?: 'nothing') . "; retrying next run\n");
-    exit(1);
-}
-file_put_contents(STATE, json_encode($state));
+    os.makedirs(os.path.dirname(STATE), mode=0o750, exist_ok=True)
+    lock = open(STATE + '.lock', 'a')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return 0  # the previous run is still posting
+
+    try:
+        st = os.stat(BANS)
+    except OSError:
+        return 0
+    try:
+        with open(STATE, encoding='utf-8') as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    # rotated or truncated: start over
+    if state.get('inode') != st.st_ino or state.get('offset', 0) > st.st_size:
+        state = {'inode': st.st_ino, 'offset': 0}
+
+    bans = []
+    with open(BANS, 'rb') as f:
+        f.seek(state['offset'])
+        for raw in f:
+            if not raw.endswith(b'\n'):
+                break  # fail2ban is mid-write: read it next time
+            state['offset'] += len(raw)
+            # <time> <jail> <address> <failures>, from fail2ban/action.d/gladios-notify.conf
+            fields = (raw.decode('utf-8', 'replace').split() + [''] * 4)[:4]
+            try:
+                ipaddress.ip_address(fields[2])
+            except ValueError:
+                continue
+            failures = int(fields[3]) if fields[3].isdigit() else 0
+            bans.append({'time': fields[0], 'jail': fields[1], 'ip': fields[2], 'failures': failures, 'samples': []})
+    if not bans:
+        save(state)
+        return 0
+
+    tails = []
+    for path in conf.get('samples', []):
+        try:
+            with open(path, 'rb') as f:
+                f.seek(max(0, os.fstat(f.fileno()).st_size - SAMPLE_TAIL))
+                tails.append(f.read().decode('utf-8', 'replace').split('\n'))
+        except OSError:
+            continue
+    for ban in bans[:DETAILED]:
+        # the address as a whole token: 1.2.3.4 must not match 11.2.3.45
+        pattern = re.compile(r'(?<![0-9A-Fa-f.:])' + re.escape(ban['ip']) + r'(?![0-9A-Fa-f.:])')
+        for lines in tails:
+            found = [line for line in lines if pattern.search(line)]
+            for sample in found[-SAMPLES_PER_BAN:]:
+                ban['samples'].append(cut(re.sub(r'[\x00-\x1f\x7f]', ' ', sample), 240))
+
+    host = socket.gethostname() or 'unknown host'
+    per_jail = Counter(ban['jail'] for ban in bans).most_common()
+    count = len(bans)
+
+    if fmt == 'json':
+        payload = {'host': host, 'total': count, 'per_jail': dict(per_jail), 'bans': bans[:DETAILED]}
+    else:
+        # attacker-controlled text (URLs, user agents) must not close a code span; on Slack, nor
+        # open a link or mention. Discord's mentions are off below.
+        def plain(s):
+            if fmt == 'slack':
+                return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('`', "'")
+            return s.replace('`', "'")
+
+        jails = ', '.join('%s %d' % (plain(jail), n) for jail, n in per_jail)
+        bold = '*gladios*' if fmt == 'slack' else '**gladios**'
+        lines = ['%s on `%s`: %d address%s banned (%s)' % (bold, plain(host), count, '' if count == 1 else 'es', jails)]
+        for ban in bans[:DETAILED]:
+            lines.append('• `%s` %s, %d hits, %s' % (ban['ip'], plain(ban['jail']), ban['failures'], plain(ban['time'])))
+            lines.extend('    `%s`' % plain(sample) for sample in ban['samples'])
+        if count > DETAILED:
+            lines.append('+{:,} more.'.format(count - DETAILED))
+        lines.append('Unban: `fail2ban-client set %s unbanip %s`' % (plain(bans[0]['jail']), bans[0]['ip']))
+        text = '\n'.join(lines)
+        payload = {'text': text} if fmt == 'slack' else {'content': cut(text, 1990), 'allowed_mentions': {'parse': []}}
+
+    request = urllib.request.Request(
+        conf['webhook'],
+        data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            status = response.status
+    except urllib.error.HTTPError as e:
+        status = e.code
+    except (urllib.error.URLError, OSError):
+        status = 0
+    if not 200 <= status < 300:
+        print('gladios-notify: the webhook answered %s; retrying next run' % (status or 'nothing'), file=sys.stderr)
+        return 1
+    save(state)
+    return 0
+
+
+def save(state):
+    with open(STATE, 'w', encoding='utf-8') as f:
+        json.dump(state, f)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

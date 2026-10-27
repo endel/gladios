@@ -2,4 +2,4 @@
 #
 # Posts fail2ban's latest bans to a webhook (bin/gladios-notify). Does nothing until
 # /etc/gladios/notify.conf names one.
-* * * * * root [ -r /etc/gladios/notify.conf ] && php /opt/gladios/bin/gladios-notify 2>&1 | logger -t gladios-notify
+* * * * * root [ -r /etc/gladios/notify.conf ] && /opt/gladios/bin/gladios-notify 2>&1 | logger -t gladios-notify

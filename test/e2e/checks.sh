@@ -47,19 +47,18 @@ expect "worker script"                   "200 -"         "$(req GET /.gladios/wo
 FORGED='1999999999.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 echo "== forged and malformed passes (cookie: gate)"
 strikes() { docker exec "$C" sh -c 'wc -l < /var/log/nginx/gladios-strikes.log'; }
-php_hits() { docker exec "$C" sh -c 'wc -l < /var/log/gladios-fpm.log'; }
-s0=$(strikes) p0=$(php_hits)
+s0=$(strikes)
 expect "no cookie"                       "200 challenge" "$(req GET /)"
-expect "no cookie: no strike, no php"    "0 0"           "$(($(strikes) - s0)) $(($(php_hits) - p0))"
-s0=$(strikes) p0=$(php_hits)
+expect "  no strike"                     "0"             "$(($(strikes) - s0))"
+s0=$(strikes)
 expect "malformed pass"                  "200 challenge" "$(req GET / -H 'Cookie: gate=nope')"
-expect "malformed: a strike, no php"     "1 0"           "$(($(strikes) - s0)) $(($(php_hits) - p0))"
-s0=$(strikes) p0=$(php_hits)
+expect "  a strike"                      "1"             "$(($(strikes) - s0))"
+s0=$(strikes)
 expect "forged pass"                     "200 challenge" "$(req GET / -H "Cookie: gate=$FORGED")"
-expect "forged: a strike, checked by php" "1 1"          "$(($(strikes) - s0)) $(($(php_hits) - p0))"
-s0=$(strikes) p0=$(php_hits)
+expect "  a strike"                      "1"             "$(($(strikes) - s0))"
+s0=$(strikes)
 expect "the default name, unused here"   "200 challenge" "$(req GET / -H "Cookie: gladios=$FORGED")"
-expect "  is just another cookie"        "0 0"           "$(($(strikes) - s0)) $(($(php_hits) - p0))"
+expect "  is just another cookie"        "0"             "$(($(strikes) - s0))"
 expect "strike line"                     "yes"           "$(docker exec "$C" tail -n 1 /var/log/nginx/gladios-strikes.log | grep -qE '^[0-9T:+-]+ strike [0-9a-f.:]+ a\.gladios\.test "GET /" ' && echo yes || echo no)"
 expect "fail2ban's filter reads it"      "yes"           "$(docker exec "$C" fail2ban-regex /var/log/nginx/gladios-strikes.log gladios | grep -qE '^Lines: .*[1-9][0-9]* matched' && echo yes || echo no)"
 
@@ -71,19 +70,23 @@ challenge=$(field challenge)
 difficulty=$(field difficulty)
 expires=$(field expires)
 expect "default difficulty"              "16"            "$difficulty"
-nonce=$(docker exec "$C" php -r '
-    require "/opt/gladios/src/Gladios.php";
-    for ($n = 0; ; $n++) {
-        $x = base_convert((string) $n, 10, 36);
-        if (Gladios\Gladios::leadingZeroBits(hash("sha256", $argv[1] . $x, true)) >= (int) $argv[2]) { echo $x; exit; }
-    }' "$challenge" "$difficulty")
+nonce=$(docker exec "$C" python3 /gladios/test/solve.py "$challenge" "$difficulty")
 expect "wrong nonce"                     "403 -"         "$(req POST /.gladios/api/verify --data "expires=$expires&nonce=zz$nonce")"
 expect "verify needs POST"               "405 -"         "$(req GET /.gladios/api/verify)"
 expect "challenge needs GET"             "405 -"         "$(req POST /.gladios/api/challenge -d x=1)"
 expect "right nonce"                     "204 -"         "$(req POST /.gladios/api/verify -c "$jar" --data "expires=$expires&nonce=$nonce")"
+expect "  Secure, HttpOnly, Lax, a week"  "yes"         "$([[ $(header set-cookie) =~ \;\ Max-Age=604800\;\ .*Secure\;\ HttpOnly\;\ SameSite=Lax$ ]] && echo yes || echo no)"
 expect "pass named gate, for gladios.test" "1"           "$(grep -cE $'^(#HttpOnly_)?\\.gladios\\.test\tTRUE\t/\tTRUE\t[0-9]+\tgate\t' "$jar")"
 expect "with the pass"                   "200 app"       "$(req GET /some/page -b "$jar")"
 expect "same pass on the sibling host"   "200 app"       "$(ON=b.gladios.test req GET / -b "$jar")"
+# the documented scheme, by hand: passes from another implementation or host carry over
+me=$(docker exec "$C" tail -n 1 /var/log/nginx/gladios-strikes.log | awk '{ print $3 }')
+secret=$(docker exec "$C" sed -E 's/^[^"]*"([^"]*)".*/\1/' /etc/gladios/secret.conf)
+minted=$(python3 -c 'import base64, hashlib, hmac, sys, time
+e = int(time.time()) + 60
+m = hmac.new(sys.argv[1].encode(), ("pass|%s|%d" % (sys.argv[2], e)).encode(), hashlib.sha256).digest()
+print("%d.%s" % (e, base64.urlsafe_b64encode(m).rstrip(b"=").decode()))' "$secret" "$me")
+expect "a pass minted by hand"           "200 app"       "$(req GET / -H "Cookie: gate=$minted")"
 
 echo "== your own mascot"
 expect "default mascot"                  "image/webp"    "$(req GET /.gladios/mascot > /dev/null; header content-type)"
@@ -116,7 +119,7 @@ expect "some 429s"                       "yes"           "$([[ $codes == *429* ]
 
 echo "== bans and their notification"
 hooks() { docker exec "$C" sh -c 'ls /tmp/hook-*.json 2> /dev/null | wc -l'; }
-notify() { docker exec "$C" php /opt/gladios/bin/gladios-notify; }
+notify() { docker exec "$C" /opt/gladios/bin/gladios-notify; }
 conf() { docker exec "$C" sh -c "printf 'webhook = \"http://127.0.0.1:9999/hook\"\nformat = $1\nsamples[] = /var/log/nginx/gladios-strikes.log\n' > /etc/gladios/notify.conf"; }
 # what a forger would hope to slip into a chat: a mention and a broken code span
 UA='<!channel> `pwned` @everyone'

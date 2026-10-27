@@ -1,32 +1,11 @@
 #!/bin/bash
-# Sets the container up the way README.md's "Installing" does, then runs php-fpm and nginx.
+# Sets the container up the way README.md's "Installing" does, then runs nginx.
 set -euo pipefail
-php=$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')
 
 /gladios/install.sh / > /dev/null
 
-adduser --system --group --no-create-home --home /nonexistent gladios > /dev/null
 install -d -o root -g root -m 0755 /etc/gladios
-head -c 48 /dev/urandom | base64 > /etc/gladios/secret
-chown root:gladios /etc/gladios/secret
-chmod 0640 /etc/gladios/secret
-
-cat > "/etc/php/$php/fpm/pool.d/gladios.conf" << EOF
-[gladios]
-user = gladios
-group = gladios
-listen = /run/php/gladios.sock
-listen.owner = www-data
-listen.group = www-data
-pm = static
-pm.max_children = 4
-request_terminate_timeout = 5s
-php_admin_value[open_basedir] = /opt/gladios/src/:/etc/gladios/
-env[GLADIOS_SECRET_FILE] = /etc/gladios/secret
-env[GLADIOS_COOKIE_DOMAIN] = gladios.test
-; test only: checks.sh counts what reaches php
-access.log = /var/log/gladios-fpm.log
-EOF
+(umask 077 && printf 'js_var $gladios_secret "%s";\n' "$(head -c 48 /dev/urandom | base64 -w0)" > /etc/gladios/secret.conf)
 
 # fail2ban with a ban action that only records: the container has no firewall to drive
 rm -f /etc/fail2ban/jail.d/defaults-debian.conf
@@ -46,7 +25,7 @@ EOF
 touch /var/log/nginx/gladios-strikes.log
 
 # the webhook gladios-notify posts to (checks.sh writes notify.conf)
-php -S 127.0.0.1:9999 /gladios/test/e2e/receiver.php > /dev/null 2>&1 &
+python3 /gladios/test/e2e/receiver.py > /dev/null 2>&1 &
 
 mkdir -p /etc/ssl/gladios-test /var/www/app
 openssl req -x509 -newkey rsa:2048 -nodes -days 7 -subj /CN=a.gladios.test \
@@ -57,10 +36,7 @@ printf '<!doctype html>\n<title>app</title>\n<p>hello from the app</p>\n' > /var
 rm -f /etc/nginx/sites-enabled/default
 cp /gladios/test/e2e/site.conf /etc/nginx/sites-enabled/gladios-test.conf
 
-mkdir -p /run/php
-"php-fpm$php" -t 2> /dev/null
-"php-fpm$php" -D
 nginx -t 2> /dev/null
 fail2ban-client -q start
-echo "ready (nginx $(nginx -v 2>&1 | sed 's|.*/||'), php $php)"
+echo "ready (nginx $(nginx -v 2>&1 | sed 's|.*/||'), njs $(njs -v))"
 exec nginx -g 'daemon off;'
