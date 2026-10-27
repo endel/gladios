@@ -1,7 +1,7 @@
 # The gladiator artwork
 
 gladios's code and documentation are under the MIT license in [LICENSE](LICENSE). The gladiator
-artwork is not. That's `public/gladios.webp`, the images made from it in `website/` (`icon.png`,
+artwork is not. That's `public/gladios.webp`, the gladiator images in `website/` (`icon.png`,
 `favicon.png`, `favicon.ico`, `apple-touch-icon.png` and `og.png`), and any other picture of the
 gladiator.
 
