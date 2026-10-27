@@ -250,6 +250,15 @@ others, over TLS with keep-alive and 64 connections. On an Apple M1 Pro's Linux 
 nginx's three processes took 11–12 MB between them. Absolute numbers depend on the machine:
 run it on yours.
 
+## Sponsors
+
+gladios is sponsored by [Colyseus](https://colyseus.io). If it's useful to you, please consider
+[sponsoring the project](https://github.com/sponsors/endel) 💖
+
+<a href="https://cdn.jsdelivr.net/gh/colyseus/.github/sponsorkit/sponsors.svg">
+  <img src="https://cdn.jsdelivr.net/gh/colyseus/.github/sponsorkit/sponsors.svg" width="100%" />
+</a>
+
 ## License
 
 The code and documentation are MIT, see [LICENSE](LICENSE). The gladiator artwork isn't: it may be
